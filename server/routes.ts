@@ -5,6 +5,8 @@ import { z } from "zod";
 import {
   insertMenuCategorySchema,
   insertMenuItemSchema,
+  insertModifierGroupSchema,
+  insertModifierSchema,
   insertPrinterSchema,
   insertPromotionSchema,
   insertCustomerSchema,
@@ -73,6 +75,52 @@ export async function registerRoutes(
     if (!existing) return res.status(404).json({ message: "Item not found" });
     const updated = await storage.updateMenuItem(id, req.body);
     res.json(updated);
+  });
+
+  // POST /api/menu/modifier-groups - create modifier group
+  app.post("/api/menu/modifier-groups", async (req, res) => {
+    const parsed = insertModifierGroupSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ message: "Invalid data", errors: parsed.error.flatten() });
+    }
+    const group = await storage.createModifierGroup(parsed.data);
+    res.status(201).json(group);
+  });
+
+  // PATCH /api/menu/modifier-groups/:id - update modifier group
+  app.patch("/api/menu/modifier-groups/:id", async (req, res) => {
+    const id = Number(req.params.id);
+    const existing = await storage.getModifierGroup(id);
+    if (!existing) return res.status(404).json({ message: "Modifier group not found" });
+    const updated = await storage.updateModifierGroup(id, req.body);
+    res.json(updated);
+  });
+
+  // POST /api/menu/modifiers - create modifier option
+  app.post("/api/menu/modifiers", async (req, res) => {
+    const parsed = insertModifierSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ message: "Invalid data", errors: parsed.error.flatten() });
+    }
+    const modifier = await storage.createModifier(parsed.data);
+    res.status(201).json(modifier);
+  });
+
+  // PATCH /api/menu/modifiers/:id - update modifier option
+  app.patch("/api/menu/modifiers/:id", async (req, res) => {
+    const id = Number(req.params.id);
+    const existing = await storage.getModifier(id);
+    if (!existing) return res.status(404).json({ message: "Modifier not found" });
+    const updated = await storage.updateModifier(id, req.body);
+    res.json(updated);
+  });
+
+  // POST /api/upload - upload image (stores as base64 data URL)
+  app.post("/api/upload", async (req, res) => {
+    const { data, filename } = req.body;
+    if (!data) return res.status(400).json({ message: "No image data provided" });
+    // data is expected to be a base64 data URL like "data:image/png;base64,..."
+    res.json({ url: data, filename });
   });
 
   // ============ ORDERS ============
@@ -190,7 +238,9 @@ export async function registerRoutes(
       paymentIntentId: null,
       notes: data.notes ?? null,
       externalOrderId: null,
-      status: "pending",
+      // POS orders go straight to "completed" (printed, no kitchen display);
+      // external/app orders start as "pending" for confirmation
+      status: data.source === "pos" ? "completed" : "pending",
     });
 
     // Create order items
@@ -578,6 +628,177 @@ export async function registerRoutes(
     res.json(updated);
   });
 
+  // ============ SETTLEMENTS (End-of-Day) ============
+
+  // GET /api/settlements?locationId= - list settlement history
+  app.get("/api/settlements", async (req, res) => {
+    const locationId = req.query.locationId ? Number(req.query.locationId) : undefined;
+    const settlements = await storage.getSettlements(locationId);
+    res.json(settlements);
+  });
+
+  // GET /api/settlements/:id - single settlement
+  app.get("/api/settlements/:id", async (req, res) => {
+    const id = Number(req.params.id);
+    const settlement = await storage.getSettlement(id);
+    if (!settlement) return res.status(404).json({ message: "Settlement not found" });
+    res.json(settlement);
+  });
+
+  // GET /api/settlements/check/:locationId/:date - check if day is already closed
+  app.get("/api/settlements/check/:locationId/:date", async (req, res) => {
+    const locationId = Number(req.params.locationId);
+    const date = req.params.date;
+    const existing = await storage.getSettlementByDate(locationId, date);
+    res.json({ closed: !!existing, settlement: existing || null });
+  });
+
+  // GET /api/settlements/preview/:locationId/:date - generate Z-report preview (before closing)
+  app.get("/api/settlements/preview/:locationId/:date", async (req, res) => {
+    const locationId = Number(req.params.locationId);
+    const date = req.params.date;
+
+    const dayStart = new Date(date);
+    dayStart.setHours(0, 0, 0, 0);
+    const dayEnd = new Date(date);
+    dayEnd.setHours(23, 59, 59, 999);
+
+    // Get all orders for the day
+    const allOrders = await storage.getOrders(locationId);
+    const dayOrders = allOrders.filter((o) => {
+      if (!o.createdAt) return false;
+      const t = new Date(o.createdAt).getTime();
+      return t >= dayStart.getTime() && t <= dayEnd.getTime();
+    });
+
+    const completedOrders = dayOrders.filter((o) => o.status !== "cancelled");
+    const cancelledOrders = dayOrders.filter((o) => o.status === "cancelled");
+
+    const cashOrders = completedOrders.filter((o) => o.paymentMethod === "cash");
+    const cardOrders = completedOrders.filter((o) => o.paymentMethod === "stripe");
+    const giftCardOrders = completedOrders.filter((o) => o.paymentMethod === "gift_card");
+    const externalOrders = completedOrders.filter((o) => o.paymentMethod === "external");
+
+    const sum = (arr: typeof completedOrders) => Math.round(arr.reduce((s, o) => s + o.total, 0) * 100) / 100;
+    const sumField = (arr: typeof completedOrders, field: "tax" | "tip" | "subtotal") =>
+      Math.round(arr.reduce((s, o) => s + (o[field] || 0), 0) * 100) / 100;
+
+    // Get shifts for the day
+    const allShifts = await storage.getShifts(locationId);
+    const dayShifts = allShifts.filter((s) => {
+      if (!s.clockIn) return false;
+      const t = new Date(s.clockIn).getTime();
+      return t >= dayStart.getTime() && t <= dayEnd.getTime();
+    });
+
+    const activeShifts = dayShifts.filter((s) => s.status === "active");
+    const totalLaborHours = Math.round(dayShifts.reduce((s, sh) => s + (sh.totalHours || 0), 0) * 100) / 100;
+
+    // Check for unfulfilled orders
+    const unfulfilledOrders = dayOrders.filter((o) => o.status === "preparing" || o.status === "pending" || o.status === "confirmed");
+
+    res.json({
+      date,
+      locationId,
+      totalOrders: completedOrders.length,
+      totalRevenue: sum(completedOrders),
+      totalTax: sumField(completedOrders, "tax"),
+      totalTips: sumField(completedOrders, "tip"),
+      cashSales: sum(cashOrders),
+      cardSales: sum(cardOrders),
+      giftCardSales: sum(giftCardOrders),
+      externalSales: sum(externalOrders),
+      cancelledOrders: cancelledOrders.length,
+      totalRefunds: sum(cancelledOrders),
+      totalLaborHours,
+      activeShifts: activeShifts.length,
+      unfulfilledOrders: unfulfilledOrders.length,
+      // For cash reconciliation: expected = starting cash + cash received
+      expectedCashFromSales: sum(cashOrders),
+    });
+  });
+
+  // POST /api/settlements - close the day
+  app.post("/api/settlements", async (req, res) => {
+    const { locationId, date, closedBy, closedByName, startingCash, actualCash, notes, ...rest } = req.body;
+    if (!locationId || !date) {
+      return res.status(400).json({ message: "locationId and date are required" });
+    }
+
+    // Check if already closed
+    const existing = await storage.getSettlementByDate(locationId, date);
+    if (existing) {
+      return res.status(409).json({ message: "This day has already been closed", settlement: existing });
+    }
+
+    // Re-calculate from orders to prevent tampering
+    const dayStart = new Date(date);
+    dayStart.setHours(0, 0, 0, 0);
+    const dayEnd = new Date(date);
+    dayEnd.setHours(23, 59, 59, 999);
+
+    const allOrders = await storage.getOrders(locationId);
+    const dayOrders = allOrders.filter((o) => {
+      if (!o.createdAt) return false;
+      const t = new Date(o.createdAt).getTime();
+      return t >= dayStart.getTime() && t <= dayEnd.getTime();
+    });
+
+    const completedOrders = dayOrders.filter((o) => o.status !== "cancelled");
+    const cancelledOrders = dayOrders.filter((o) => o.status === "cancelled");
+
+    const cashOrders = completedOrders.filter((o) => o.paymentMethod === "cash");
+    const cardOrders = completedOrders.filter((o) => o.paymentMethod === "stripe");
+    const giftCardOrders = completedOrders.filter((o) => o.paymentMethod === "gift_card");
+    const externalOrders = completedOrders.filter((o) => o.paymentMethod === "external");
+
+    const sum = (arr: typeof completedOrders) => Math.round(arr.reduce((s, o) => s + o.total, 0) * 100) / 100;
+    const sumField = (arr: typeof completedOrders, field: "tax" | "tip") =>
+      Math.round(arr.reduce((s, o) => s + (o[field] || 0), 0) * 100) / 100;
+
+    const cashSalesTotal = sum(cashOrders);
+    const startCash = startingCash ?? 200;
+    const expectedCash = Math.round((startCash + cashSalesTotal) * 100) / 100;
+    const actual = actualCash ?? expectedCash;
+    const diff = Math.round((actual - expectedCash) * 100) / 100;
+
+    // Get labor data
+    const allShifts = await storage.getShifts(locationId);
+    const dayShifts = allShifts.filter((s) => {
+      if (!s.clockIn) return false;
+      const t = new Date(s.clockIn).getTime();
+      return t >= dayStart.getTime() && t <= dayEnd.getTime();
+    });
+    const totalLaborHours = Math.round(dayShifts.reduce((s, sh) => s + (sh.totalHours || 0), 0) * 100) / 100;
+
+    const settlement = await storage.createSettlement({
+      locationId,
+      date,
+      closedBy: closedBy ?? null,
+      closedByName: closedByName ?? null,
+      startingCash: startCash,
+      expectedCash,
+      actualCash: actual,
+      cashDifference: diff,
+      totalOrders: completedOrders.length,
+      totalRevenue: sum(completedOrders),
+      totalTax: sumField(completedOrders, "tax"),
+      totalTips: sumField(completedOrders, "tip"),
+      cashSales: cashSalesTotal,
+      cardSales: sum(cardOrders),
+      giftCardSales: sum(giftCardOrders),
+      externalSales: sum(externalOrders),
+      totalRefunds: sum(cancelledOrders),
+      cancelledOrders: cancelledOrders.length,
+      totalLaborHours,
+      totalLaborCost: 0, // can be calculated if hourly rates are set
+      notes: notes ?? null,
+      status: "closed",
+    });
+
+    res.status(201).json(settlement);
+  });
+
   // ============ REPORTS ============
 
   app.get("/api/reports/daily", async (req, res) => {
@@ -617,6 +838,56 @@ export async function registerRoutes(
     }
 
     res.json(Object.values(hourly));
+  });
+
+  // GET /api/reports/dashboard - full dashboard data for date range
+  app.get("/api/reports/dashboard", async (req, res) => {
+    const locationId = Number(req.query.locationId);
+    const startDate = String(req.query.startDate || new Date().toISOString().split("T")[0]);
+    const endDate = String(req.query.endDate || startDate);
+    if (!locationId) return res.status(400).json({ message: "locationId is required" });
+    const data = await storage.getReportDashboard(locationId, startDate, endDate);
+    res.json(data);
+  });
+
+  // GET /api/reports/sales - sales breakdown for date range
+  app.get("/api/reports/sales", async (req, res) => {
+    const locationId = Number(req.query.locationId);
+    const startDate = String(req.query.startDate || new Date().toISOString().split("T")[0]);
+    const endDate = String(req.query.endDate || startDate);
+    if (!locationId) return res.status(400).json({ message: "locationId is required" });
+    const data = await storage.getReportSales(locationId, startDate, endDate);
+    res.json(data);
+  });
+
+  // GET /api/reports/product-mix - product performance for date range
+  app.get("/api/reports/product-mix", async (req, res) => {
+    const locationId = Number(req.query.locationId);
+    const startDate = String(req.query.startDate || new Date().toISOString().split("T")[0]);
+    const endDate = String(req.query.endDate || startDate);
+    if (!locationId) return res.status(400).json({ message: "locationId is required" });
+    const data = await storage.getReportProductMix(locationId, startDate, endDate);
+    res.json(data);
+  });
+
+  // GET /api/reports/labor - labor analytics for date range
+  app.get("/api/reports/labor", async (req, res) => {
+    const locationId = Number(req.query.locationId);
+    const startDate = String(req.query.startDate || new Date().toISOString().split("T")[0]);
+    const endDate = String(req.query.endDate || startDate);
+    if (!locationId) return res.status(400).json({ message: "locationId is required" });
+    const data = await storage.getReportLabor(locationId, startDate, endDate);
+    res.json(data);
+  });
+
+  // GET /api/reports/customers - customer analytics for date range
+  app.get("/api/reports/customers", async (req, res) => {
+    const locationId = Number(req.query.locationId);
+    const startDate = String(req.query.startDate || new Date().toISOString().split("T")[0]);
+    const endDate = String(req.query.endDate || startDate);
+    if (!locationId) return res.status(400).json({ message: "locationId is required" });
+    const data = await storage.getReportCustomers(locationId, startDate, endDate);
+    res.json(data);
   });
 
   // ============ PROMOTIONS ============

@@ -19,6 +19,7 @@ import Customers from "@/pages/customers";
 import RewardsConfig from "@/pages/rewards-config";
 import GiftCards from "@/pages/gift-cards";
 import TimeClock from "@/pages/time-clock";
+import Settlement from "@/pages/settlement";
 
 function AppRouter({ locationId }: { locationId: number }) {
   return (
@@ -28,6 +29,7 @@ function AppRouter({ locationId }: { locationId: number }) {
       <Route path="/orders">{() => <Orders locationId={locationId} />}</Route>
       <Route path="/time-clock">{() => <TimeClock locationId={locationId} />}</Route>
       <Route path="/menu" component={MenuManagement} />
+      <Route path="/settlement">{() => <Settlement locationId={locationId} />}</Route>
       <Route path="/reports">{() => <Reports locationId={locationId} />}</Route>
       <Route path="/promotions" component={Promotions} />
       <Route path="/customers" component={Customers} />

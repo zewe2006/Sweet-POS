@@ -328,3 +328,41 @@ export const shifts = pgTable("shifts", {
 export const insertShiftSchema = createInsertSchema(shifts).omit({ id: true, createdAt: true, totalHours: true });
 export type InsertShift = z.infer<typeof insertShiftSchema>;
 export type Shift = typeof shifts.$inferSelect;
+
+// ============ SETTLEMENTS (End-of-Day) ============
+export const settlements = pgTable("settlements", {
+  id: serial("id").primaryKey(),
+  locationId: integer("location_id").notNull(),
+  date: text("date").notNull(), // YYYY-MM-DD
+  closedBy: integer("closed_by"), // user ID of manager who closed the day
+  closedByName: text("closed_by_name"),
+  // Cash reconciliation
+  startingCash: real("starting_cash").default(200), // float amount at start of day
+  expectedCash: real("expected_cash").default(0), // starting + cash sales - cash payouts
+  actualCash: real("actual_cash").default(0), // counted by manager
+  cashDifference: real("cash_difference").default(0), // actual - expected (over/short)
+  // Sales summary
+  totalOrders: integer("total_orders").default(0),
+  totalRevenue: real("total_revenue").default(0),
+  totalTax: real("total_tax").default(0),
+  totalTips: real("total_tips").default(0),
+  // Payment breakdown
+  cashSales: real("cash_sales").default(0),
+  cardSales: real("card_sales").default(0),
+  giftCardSales: real("gift_card_sales").default(0),
+  externalSales: real("external_sales").default(0), // UberEats, DoorDash, etc.
+  // Refunds / voids
+  totalRefunds: real("total_refunds").default(0),
+  cancelledOrders: integer("cancelled_orders").default(0),
+  // Labor
+  totalLaborHours: real("total_labor_hours").default(0),
+  totalLaborCost: real("total_labor_cost").default(0),
+  // Notes
+  notes: text("notes"),
+  status: text("status").default("closed"), // 'closed' | 'adjusted'
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export const insertSettlementSchema = createInsertSchema(settlements).omit({ id: true, createdAt: true });
+export type InsertSettlement = z.infer<typeof insertSettlementSchema>;
+export type Settlement = typeof settlements.$inferSelect;

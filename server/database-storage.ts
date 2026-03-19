@@ -4,7 +4,7 @@ import {
   locations, printers, menuCategories, menuItems,
   modifierGroups, modifiers, orders, orderItems,
   promotions, users, customers, rewardConfig,
-  giftCards, customerTransactions, shifts,
+  giftCards, customerTransactions, shifts, settlements,
 } from "@shared/schema";
 import type {
   Location, InsertLocation,
@@ -22,8 +22,16 @@ import type {
   GiftCard, InsertGiftCard,
   CustomerTransaction, InsertCustomerTransaction,
   Shift, InsertShift,
+  Settlement, InsertSettlement,
 } from "@shared/schema";
-import type { IStorage } from "./storage";
+import type { IStorage, DashboardReport, SalesReport, ProductMixReport, LaborReport, CustomerReport } from "./storage";
+
+function getISOWeek(date: Date): number {
+  const d = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
+  d.setUTCDate(d.getUTCDate() + 4 - (d.getUTCDay() || 7));
+  const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
+  return Math.ceil((((d.getTime() - yearStart.getTime()) / 86400000) + 1) / 7);
+}
 
 export class DatabaseStorage implements IStorage {
   // ============ LOCATIONS ============
@@ -411,6 +419,36 @@ export class DatabaseStorage implements IStorage {
     return `${prefix}-${String(count).padStart(4, "0")}`;
   }
 
+  // ============ SETTLEMENTS ============
+  async getSettlements(locationId?: number): Promise<Settlement[]> {
+    if (locationId) {
+      return db.select().from(settlements).where(eq(settlements.locationId, locationId)).orderBy(desc(settlements.createdAt));
+    }
+    return db.select().from(settlements).orderBy(desc(settlements.createdAt));
+  }
+
+  async getSettlement(id: number): Promise<Settlement | undefined> {
+    const [row] = await db.select().from(settlements).where(eq(settlements.id, id));
+    return row;
+  }
+
+  async getSettlementByDate(locationId: number, date: string): Promise<Settlement | undefined> {
+    const [row] = await db.select().from(settlements).where(
+      and(eq(settlements.locationId, locationId), eq(settlements.date, date))
+    );
+    return row;
+  }
+
+  async createSettlement(data: InsertSettlement): Promise<Settlement> {
+    const [row] = await db.insert(settlements).values(data).returning();
+    return row;
+  }
+
+  async updateSettlement(id: number, data: Partial<InsertSettlement>): Promise<Settlement | undefined> {
+    const [row] = await db.update(settlements).set(data).where(eq(settlements.id, id)).returning();
+    return row;
+  }
+
   async getDailySales(locationId: number, date: string): Promise<{ totalOrders: number; totalRevenue: number; avgOrderValue: number }> {
     const dayStart = new Date(date);
     dayStart.setHours(0, 0, 0, 0);
@@ -433,5 +471,477 @@ export class DatabaseStorage implements IStorage {
     const avgOrderValue = totalOrders > 0 ? Math.round((totalRevenue / totalOrders) * 100) / 100 : 0;
 
     return { totalOrders, totalRevenue, avgOrderValue };
+  }
+
+  // ============ REPORTS ============
+
+  private getDateRange(startDate: string, endDate: string) {
+    const start = new Date(startDate);
+    start.setHours(0, 0, 0, 0);
+    const end = new Date(endDate);
+    end.setHours(23, 59, 59, 999);
+    return { start, end };
+  }
+
+  async getReportDashboard(locationId: number, startDate: string, endDate: string): Promise<DashboardReport> {
+    const { start, end } = this.getDateRange(startDate, endDate);
+    const dateFilter = and(
+      eq(orders.locationId, locationId),
+      sql`${orders.createdAt} >= ${start}`,
+      sql`${orders.createdAt} <= ${end}`,
+      sql`${orders.status} != 'cancelled'`
+    );
+
+    // KPIs
+    const [kpiRow] = await db.select({
+      totalOrders: sql<number>`count(*)`,
+      totalRevenue: sql<number>`coalesce(sum(${orders.total}), 0)`,
+      totalTips: sql<number>`coalesce(sum(${orders.tip}), 0)`,
+    }).from(orders).where(dateFilter);
+
+    const totalOrders = Number(kpiRow?.totalOrders ?? 0);
+    const totalRevenue = Math.round(Number(kpiRow?.totalRevenue ?? 0) * 100) / 100;
+    const totalTips = Math.round(Number(kpiRow?.totalTips ?? 0) * 100) / 100;
+    const avgOrderValue = totalOrders > 0 ? Math.round((totalRevenue / totalOrders) * 100) / 100 : 0;
+
+    // Revenue trend by day
+    const trendRows = await db.select({
+      date: sql<string>`to_char(${orders.createdAt}, 'YYYY-MM-DD')`,
+      revenue: sql<number>`coalesce(sum(${orders.total}), 0)`,
+      orders: sql<number>`count(*)`,
+    }).from(orders).where(dateFilter)
+      .groupBy(sql`to_char(${orders.createdAt}, 'YYYY-MM-DD')`)
+      .orderBy(sql`to_char(${orders.createdAt}, 'YYYY-MM-DD')`);
+
+    const revenueTrend = trendRows.map(r => ({
+      date: String(r.date),
+      revenue: Math.round(Number(r.revenue) * 100) / 100,
+      orders: Number(r.orders),
+    }));
+
+    // Orders by source
+    const sourceRows = await db.select({
+      source: orders.source,
+      count: sql<number>`count(*)`,
+      revenue: sql<number>`coalesce(sum(${orders.total}), 0)`,
+    }).from(orders).where(dateFilter).groupBy(orders.source);
+
+    const ordersBySource = sourceRows.map(r => ({
+      source: r.source || "pos",
+      count: Number(r.count),
+      revenue: Math.round(Number(r.revenue) * 100) / 100,
+    }));
+
+    // Orders by payment method
+    const paymentRows = await db.select({
+      method: orders.paymentMethod,
+      count: sql<number>`count(*)`,
+      revenue: sql<number>`coalesce(sum(${orders.total}), 0)`,
+    }).from(orders).where(dateFilter).groupBy(orders.paymentMethod);
+
+    const ordersByPayment = paymentRows.map(r => ({
+      method: r.method || "unknown",
+      count: Number(r.count),
+      revenue: Math.round(Number(r.revenue) * 100) / 100,
+    }));
+
+    // Hourly distribution
+    const hourlyRows = await db.select({
+      hour: sql<number>`extract(hour from ${orders.createdAt})`,
+      orders: sql<number>`count(*)`,
+      revenue: sql<number>`coalesce(sum(${orders.total}), 0)`,
+    }).from(orders).where(dateFilter)
+      .groupBy(sql`extract(hour from ${orders.createdAt})`)
+      .orderBy(sql`extract(hour from ${orders.createdAt})`);
+
+    const hourlyDistribution = hourlyRows.map(r => ({
+      hour: Number(r.hour),
+      orders: Number(r.orders),
+      revenue: Math.round(Number(r.revenue) * 100) / 100,
+    }));
+
+    return {
+      kpis: { totalRevenue, totalOrders, avgOrderValue, totalTips },
+      revenueTrend,
+      ordersBySource,
+      ordersByPayment,
+      hourlyDistribution,
+    };
+  }
+
+  async getReportSales(locationId: number, startDate: string, endDate: string): Promise<SalesReport> {
+    const { start, end } = this.getDateRange(startDate, endDate);
+    const dateFilter = and(
+      eq(orders.locationId, locationId),
+      sql`${orders.createdAt} >= ${start}`,
+      sql`${orders.createdAt} <= ${end}`,
+      sql`${orders.status} != 'cancelled'`
+    );
+
+    // Daily breakdown
+    const dailyRows = await db.select({
+      date: sql<string>`to_char(${orders.createdAt}, 'YYYY-MM-DD')`,
+      orders: sql<number>`count(*)`,
+      grossSales: sql<number>`coalesce(sum(${orders.subtotal}), 0)`,
+      tax: sql<number>`coalesce(sum(${orders.tax}), 0)`,
+      tips: sql<number>`coalesce(sum(${orders.tip}), 0)`,
+      total: sql<number>`coalesce(sum(${orders.total}), 0)`,
+    }).from(orders).where(dateFilter)
+      .groupBy(sql`to_char(${orders.createdAt}, 'YYYY-MM-DD')`)
+      .orderBy(sql`to_char(${orders.createdAt}, 'YYYY-MM-DD')`);
+
+    const dailyBreakdown = dailyRows.map(r => ({
+      date: String(r.date),
+      orders: Number(r.orders),
+      grossSales: Math.round(Number(r.grossSales) * 100) / 100,
+      discounts: 0,
+      netSales: Math.round(Number(r.grossSales) * 100) / 100,
+      tax: Math.round(Number(r.tax) * 100) / 100,
+      tips: Math.round(Number(r.tips) * 100) / 100,
+      total: Math.round(Number(r.total) * 100) / 100,
+    }));
+
+    // Payment breakdown
+    const paymentRows = await db.select({
+      method: orders.paymentMethod,
+      count: sql<number>`count(*)`,
+      total: sql<number>`coalesce(sum(${orders.total}), 0)`,
+    }).from(orders).where(dateFilter).groupBy(orders.paymentMethod);
+
+    const paymentBreakdown = paymentRows.map(r => ({
+      method: r.method || "unknown",
+      count: Number(r.count),
+      total: Math.round(Number(r.total) * 100) / 100,
+    }));
+
+    // Source breakdown
+    const sourceRows = await db.select({
+      source: orders.source,
+      count: sql<number>`count(*)`,
+      total: sql<number>`coalesce(sum(${orders.total}), 0)`,
+    }).from(orders).where(dateFilter).groupBy(orders.source);
+
+    const sourceBreakdown = sourceRows.map(r => ({
+      source: r.source || "pos",
+      count: Number(r.count),
+      total: Math.round(Number(r.total) * 100) / 100,
+    }));
+
+    // Type breakdown
+    const typeRows = await db.select({
+      type: orders.type,
+      count: sql<number>`count(*)`,
+      total: sql<number>`coalesce(sum(${orders.total}), 0)`,
+    }).from(orders).where(dateFilter).groupBy(orders.type);
+
+    const typeBreakdown = typeRows.map(r => ({
+      type: (r.type || "dine_in").replace("_", " "),
+      count: Number(r.count),
+      total: Math.round(Number(r.total) * 100) / 100,
+    }));
+
+    // Totals
+    const totalOrders = dailyBreakdown.reduce((s, d) => s + d.orders, 0);
+    const totalGross = dailyBreakdown.reduce((s, d) => s + d.grossSales, 0);
+    const totalTax = dailyBreakdown.reduce((s, d) => s + d.tax, 0);
+    const totalTips = dailyBreakdown.reduce((s, d) => s + d.tips, 0);
+    const totalTotal = dailyBreakdown.reduce((s, d) => s + d.total, 0);
+
+    return {
+      dailyBreakdown,
+      paymentBreakdown,
+      sourceBreakdown,
+      typeBreakdown,
+      totals: {
+        orders: totalOrders,
+        grossSales: Math.round(totalGross * 100) / 100,
+        discounts: 0,
+        netSales: Math.round(totalGross * 100) / 100,
+        tax: Math.round(totalTax * 100) / 100,
+        tips: Math.round(totalTips * 100) / 100,
+        total: Math.round(totalTotal * 100) / 100,
+      },
+    };
+  }
+
+  async getReportProductMix(locationId: number, startDate: string, endDate: string): Promise<ProductMixReport> {
+    const { start, end } = this.getDateRange(startDate, endDate);
+
+    // Join order_items with orders and menu_items
+    const rows = await db.select({
+      menuItemId: orderItems.menuItemId,
+      name: orderItems.name,
+      categoryId: menuItems.categoryId,
+      cost: menuItems.cost,
+      quantity: sql<number>`coalesce(sum(${orderItems.quantity}), 0)`,
+      revenue: sql<number>`coalesce(sum(${orderItems.unitPrice} * ${orderItems.quantity}), 0)`,
+    })
+      .from(orderItems)
+      .innerJoin(orders, eq(orderItems.orderId, orders.id))
+      .leftJoin(menuItems, eq(orderItems.menuItemId, menuItems.id))
+      .where(and(
+        eq(orders.locationId, locationId),
+        sql`${orders.createdAt} >= ${start}`,
+        sql`${orders.createdAt} <= ${end}`,
+        sql`${orders.status} != 'cancelled'`
+      ))
+      .groupBy(orderItems.menuItemId, orderItems.name, menuItems.categoryId, menuItems.cost);
+
+    // Get categories for names
+    const cats = await db.select().from(menuCategories);
+    const catMap = new Map(cats.map(c => [c.id, c.name]));
+
+    const items = rows.map(r => ({
+      menuItemId: r.menuItemId,
+      name: r.name,
+      category: catMap.get(r.categoryId ?? 0) || "Uncategorized",
+      cost: Number(r.cost ?? 0),
+      quantity: Number(r.quantity),
+      revenue: Math.round(Number(r.revenue) * 100) / 100,
+    }));
+
+    const topByQuantity = [...items].sort((a, b) => b.quantity - a.quantity).slice(0, 20);
+    const topByRevenue = [...items].sort((a, b) => b.revenue - a.revenue).slice(0, 20);
+
+    // Category breakdown
+    const catAgg: Record<string, { category: string; itemCount: number; totalQuantity: number; totalRevenue: number }> = {};
+    for (const item of items) {
+      if (!catAgg[item.category]) {
+        catAgg[item.category] = { category: item.category, itemCount: 0, totalQuantity: 0, totalRevenue: 0 };
+      }
+      catAgg[item.category].itemCount++;
+      catAgg[item.category].totalQuantity += item.quantity;
+      catAgg[item.category].totalRevenue += item.revenue;
+    }
+    const categoryBreakdown = Object.values(catAgg)
+      .map(c => ({ ...c, totalRevenue: Math.round(c.totalRevenue * 100) / 100 }))
+      .sort((a, b) => b.totalRevenue - a.totalRevenue);
+
+    // Item profitability (only items with cost data)
+    const itemProfitability = items
+      .filter(i => i.cost > 0)
+      .map(i => {
+        const totalCost = i.cost * i.quantity;
+        const profit = i.revenue - totalCost;
+        const margin = i.revenue > 0 ? Math.round((profit / i.revenue) * 10000) / 100 : 0;
+        return { menuItemId: i.menuItemId, name: i.name, cost: Math.round(totalCost * 100) / 100, revenue: i.revenue, profit: Math.round(profit * 100) / 100, margin };
+      })
+      .sort((a, b) => b.profit - a.profit);
+
+    return { topByQuantity, topByRevenue, categoryBreakdown, itemProfitability };
+  }
+
+  async getReportLabor(locationId: number, startDate: string, endDate: string): Promise<LaborReport> {
+    const { start, end } = this.getDateRange(startDate, endDate);
+
+    // Get shifts in range
+    const shiftRows = await db.select({
+      id: shifts.id,
+      userId: shifts.userId,
+      clockIn: shifts.clockIn,
+      clockOut: shifts.clockOut,
+      breakMinutes: shifts.breakMinutes,
+      totalHours: shifts.totalHours,
+      status: shifts.status,
+    }).from(shifts).where(and(
+      eq(shifts.locationId, locationId),
+      sql`${shifts.clockIn} >= ${start}`,
+      sql`${shifts.clockIn} <= ${end}`,
+    ));
+
+    // Get all users for name/role/rate
+    const allUsers = await db.select().from(users);
+    const userMap = new Map(allUsers.map(u => [u.id, u]));
+
+    // Employee summary
+    const empAgg: Record<number, { userId: number; name: string; role: string; hoursWorked: number; breakMinutes: number; laborCost: number; shiftsCount: number; hourlyRate: number }> = {};
+    for (const s of shiftRows) {
+      const u = userMap.get(s.userId);
+      if (!empAgg[s.userId]) {
+        empAgg[s.userId] = {
+          userId: s.userId,
+          name: u?.name || "Unknown",
+          role: u?.role || "cashier",
+          hoursWorked: 0,
+          breakMinutes: 0,
+          laborCost: 0,
+          shiftsCount: 0,
+          hourlyRate: u?.hourlyRate || 0,
+        };
+      }
+      const hours = Number(s.totalHours ?? 0);
+      empAgg[s.userId].hoursWorked += hours;
+      empAgg[s.userId].breakMinutes += Number(s.breakMinutes ?? 0);
+      empAgg[s.userId].shiftsCount++;
+    }
+    const employeeSummary = Object.values(empAgg).map(e => ({
+      ...e,
+      hoursWorked: Math.round(e.hoursWorked * 100) / 100,
+      laborCost: Math.round(e.hoursWorked * e.hourlyRate * 100) / 100,
+    })).sort((a, b) => b.hoursWorked - a.hoursWorked);
+
+    // Daily labor trend
+    const dailyAgg: Record<string, { date: string; totalHours: number; totalCost: number }> = {};
+    for (const s of shiftRows) {
+      const day = new Date(s.clockIn).toISOString().split("T")[0];
+      if (!dailyAgg[day]) dailyAgg[day] = { date: day, totalHours: 0, totalCost: 0 };
+      const hours = Number(s.totalHours ?? 0);
+      const rate = userMap.get(s.userId)?.hourlyRate || 0;
+      dailyAgg[day].totalHours += hours;
+      dailyAgg[day].totalCost += hours * rate;
+    }
+    const dailyLaborTrend = Object.values(dailyAgg)
+      .map(d => ({ ...d, totalHours: Math.round(d.totalHours * 100) / 100, totalCost: Math.round(d.totalCost * 100) / 100 }))
+      .sort((a, b) => a.date.localeCompare(b.date));
+
+    // Labor vs revenue
+    const totalLaborCost = employeeSummary.reduce((s, e) => s + e.laborCost, 0);
+
+    // Get revenue for same period
+    const [revRow] = await db.select({
+      revenue: sql<number>`coalesce(sum(${orders.total}), 0)`,
+    }).from(orders).where(and(
+      eq(orders.locationId, locationId),
+      sql`${orders.createdAt} >= ${start}`,
+      sql`${orders.createdAt} <= ${end}`,
+      sql`${orders.status} != 'cancelled'`
+    ));
+    const totalRevenue = Math.round(Number(revRow?.revenue ?? 0) * 100) / 100;
+    const ratio = totalRevenue > 0 ? Math.round((totalLaborCost / totalRevenue) * 10000) / 100 : 0;
+
+    // Overtime flags
+    const overtimeFlags: LaborReport["overtimeFlags"] = [];
+    // Daily overtime: any shift > 8 hours
+    for (const s of shiftRows) {
+      const hours = Number(s.totalHours ?? 0);
+      if (hours > 8) {
+        const u = userMap.get(s.userId);
+        overtimeFlags.push({
+          userId: s.userId,
+          name: u?.name || "Unknown",
+          date: new Date(s.clockIn).toISOString().split("T")[0],
+          hoursWorked: Math.round(hours * 100) / 100,
+          type: "daily",
+        });
+      }
+    }
+    // Weekly overtime: group by user + ISO week
+    const weeklyAgg: Record<string, { userId: number; name: string; hours: number; week: string }> = {};
+    for (const s of shiftRows) {
+      const d = new Date(s.clockIn);
+      const weekNum = getISOWeek(d);
+      const year = d.getFullYear();
+      const key = `${s.userId}-${year}-W${weekNum}`;
+      if (!weeklyAgg[key]) {
+        const u = userMap.get(s.userId);
+        weeklyAgg[key] = { userId: s.userId, name: u?.name || "Unknown", hours: 0, week: `${year}-W${weekNum}` };
+      }
+      weeklyAgg[key].hours += Number(s.totalHours ?? 0);
+    }
+    for (const w of Object.values(weeklyAgg)) {
+      if (w.hours > 40) {
+        overtimeFlags.push({
+          userId: w.userId,
+          name: w.name,
+          date: w.week,
+          hoursWorked: Math.round(w.hours * 100) / 100,
+          type: "weekly",
+        });
+      }
+    }
+
+    return {
+      employeeSummary,
+      dailyLaborTrend,
+      laborVsRevenue: { totalLaborCost: Math.round(totalLaborCost * 100) / 100, totalRevenue, ratio },
+      overtimeFlags,
+    };
+  }
+
+  async getReportCustomers(locationId: number, startDate: string, endDate: string): Promise<CustomerReport> {
+    const { start, end } = this.getDateRange(startDate, endDate);
+
+    // New customers created in date range
+    const [newRow] = await db.select({
+      count: sql<number>`count(*)`,
+    }).from(customers).where(and(
+      sql`${customers.createdAt} >= ${start}`,
+      sql`${customers.createdAt} <= ${end}`,
+    ));
+    const newCustomers = Number(newRow?.count ?? 0);
+
+    // Returning customers: distinct customerPhone in orders within range where customer was created before range
+    const returningRows = await db.select({
+      count: sql<number>`count(distinct ${orders.customerPhone})`,
+    }).from(orders)
+      .innerJoin(customers, sql`trim(${orders.customerPhone}) = trim(${customers.phone})`)
+      .where(and(
+        eq(orders.locationId, locationId),
+        sql`${orders.createdAt} >= ${start}`,
+        sql`${orders.createdAt} <= ${end}`,
+        sql`${customers.createdAt} < ${start}`,
+        sql`${orders.customerPhone} is not null`,
+        sql`${orders.customerPhone} != ''`,
+      ));
+    const returningCustomers = Number(returningRows[0]?.count ?? 0);
+
+    // Top customers by spend
+    const topRows = await db.select({
+      id: customers.id,
+      name: customers.name,
+      phone: customers.phone,
+      lifetimeSpend: customers.lifetimeSpend,
+      visitCount: customers.visitCount,
+      tier: customers.tier,
+    }).from(customers)
+      .where(eq(customers.isActive, true))
+      .orderBy(desc(customers.lifetimeSpend))
+      .limit(20);
+
+    const topBySpend = topRows.map(r => ({
+      id: r.id,
+      name: r.name,
+      phone: r.phone,
+      lifetimeSpend: Number(r.lifetimeSpend ?? 0),
+      visitCount: Number(r.visitCount ?? 0),
+      tier: r.tier || "bronze",
+    }));
+
+    // Tier distribution
+    const tierRows = await db.select({
+      tier: customers.tier,
+      count: sql<number>`count(*)`,
+    }).from(customers)
+      .where(eq(customers.isActive, true))
+      .groupBy(customers.tier);
+
+    const tierDistribution = tierRows.map(r => ({
+      tier: r.tier || "bronze",
+      count: Number(r.count),
+    }));
+
+    // Acquisition trend
+    const acqRows = await db.select({
+      date: sql<string>`to_char(${customers.createdAt}, 'YYYY-MM-DD')`,
+      newCustomers: sql<number>`count(*)`,
+    }).from(customers)
+      .where(and(
+        sql`${customers.createdAt} >= ${start}`,
+        sql`${customers.createdAt} <= ${end}`,
+      ))
+      .groupBy(sql`to_char(${customers.createdAt}, 'YYYY-MM-DD')`)
+      .orderBy(sql`to_char(${customers.createdAt}, 'YYYY-MM-DD')`);
+
+    const acquisitionTrend = acqRows.map(r => ({
+      date: String(r.date),
+      newCustomers: Number(r.newCustomers),
+    }));
+
+    return {
+      newVsReturning: { newCustomers, returningCustomers },
+      topBySpend,
+      tierDistribution,
+      acquisitionTrend,
+    };
   }
 }

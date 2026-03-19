@@ -16,6 +16,50 @@ import {
   type StoreHours,
 } from "@shared/schema";
 
+// ============ REPORT TYPES ============
+export interface DashboardReport {
+  kpis: { totalRevenue: number; totalOrders: number; avgOrderValue: number; totalTips: number };
+  revenueTrend: Array<{ date: string; revenue: number; orders: number }>;
+  ordersBySource: Array<{ source: string; count: number; revenue: number }>;
+  ordersByPayment: Array<{ method: string; count: number; revenue: number }>;
+  hourlyDistribution: Array<{ hour: number; orders: number; revenue: number }>;
+}
+
+export interface SalesReport {
+  dailyBreakdown: Array<{
+    date: string; orders: number; grossSales: number; discounts: number;
+    netSales: number; tax: number; tips: number; total: number;
+  }>;
+  paymentBreakdown: Array<{ method: string; count: number; total: number }>;
+  sourceBreakdown: Array<{ source: string; count: number; total: number }>;
+  typeBreakdown: Array<{ type: string; count: number; total: number }>;
+  totals: { orders: number; grossSales: number; discounts: number; netSales: number; tax: number; tips: number; total: number };
+}
+
+export interface ProductMixReport {
+  topByQuantity: Array<{ menuItemId: number; name: string; category: string; quantity: number; revenue: number }>;
+  topByRevenue: Array<{ menuItemId: number; name: string; category: string; quantity: number; revenue: number }>;
+  categoryBreakdown: Array<{ category: string; itemCount: number; totalQuantity: number; totalRevenue: number }>;
+  itemProfitability: Array<{ menuItemId: number; name: string; cost: number; revenue: number; profit: number; margin: number }>;
+}
+
+export interface LaborReport {
+  employeeSummary: Array<{
+    userId: number; name: string; role: string; hoursWorked: number;
+    breakMinutes: number; laborCost: number; shiftsCount: number;
+  }>;
+  dailyLaborTrend: Array<{ date: string; totalHours: number; totalCost: number }>;
+  laborVsRevenue: { totalLaborCost: number; totalRevenue: number; ratio: number };
+  overtimeFlags: Array<{ userId: number; name: string; date: string; hoursWorked: number; type: string }>;
+}
+
+export interface CustomerReport {
+  newVsReturning: { newCustomers: number; returningCustomers: number };
+  topBySpend: Array<{ id: number; name: string; phone: string | null; lifetimeSpend: number; visitCount: number; tier: string }>;
+  tierDistribution: Array<{ tier: string; count: number }>;
+  acquisitionTrend: Array<{ date: string; newCustomers: number }>;
+}
+
 export interface IStorage {
   // Locations
   getLocations(): Promise<Location[]>;
@@ -109,9 +153,23 @@ export interface IStorage {
   createShift(data: import("@shared/schema").InsertShift): Promise<import("@shared/schema").Shift>;
   updateShift(id: number, data: Partial<import("@shared/schema").InsertShift & { totalHours: number }>): Promise<import("@shared/schema").Shift | undefined>;
 
+  // Settlements (End-of-Day)
+  getSettlements(locationId?: number): Promise<import("@shared/schema").Settlement[]>;
+  getSettlement(id: number): Promise<import("@shared/schema").Settlement | undefined>;
+  getSettlementByDate(locationId: number, date: string): Promise<import("@shared/schema").Settlement | undefined>;
+  createSettlement(data: import("@shared/schema").InsertSettlement): Promise<import("@shared/schema").Settlement>;
+  updateSettlement(id: number, data: Partial<import("@shared/schema").InsertSettlement>): Promise<import("@shared/schema").Settlement | undefined>;
+
   // Utilities
   getNextOrderNumber(locationId: number): Promise<string>;
   getDailySales(locationId: number, date: string): Promise<{ totalOrders: number; totalRevenue: number; avgOrderValue: number }>;
+
+  // Reports
+  getReportDashboard(locationId: number, startDate: string, endDate: string): Promise<DashboardReport>;
+  getReportSales(locationId: number, startDate: string, endDate: string): Promise<SalesReport>;
+  getReportProductMix(locationId: number, startDate: string, endDate: string): Promise<ProductMixReport>;
+  getReportLabor(locationId: number, startDate: string, endDate: string): Promise<LaborReport>;
+  getReportCustomers(locationId: number, startDate: string, endDate: string): Promise<CustomerReport>;
 }
 
 export class MemStorage implements IStorage {
@@ -1323,6 +1381,30 @@ export class MemStorage implements IStorage {
   async getActiveShift() { return undefined; }
   async createShift(data: any) { return { id: 0, ...data } as any; }
   async updateShift() { return undefined; }
+
+  // ============ SETTLEMENTS (stubs) ============
+  async getSettlements() { return []; }
+  async getSettlement() { return undefined; }
+  async getSettlementByDate() { return undefined; }
+  async createSettlement(data: any) { return { id: 0, ...data } as any; }
+  async updateSettlement() { return undefined; }
+
+  // ============ REPORTS (stubs) ============
+  async getReportDashboard(): Promise<DashboardReport> {
+    return { kpis: { totalRevenue: 0, totalOrders: 0, avgOrderValue: 0, totalTips: 0 }, revenueTrend: [], ordersBySource: [], ordersByPayment: [], hourlyDistribution: [] };
+  }
+  async getReportSales(): Promise<SalesReport> {
+    return { dailyBreakdown: [], paymentBreakdown: [], sourceBreakdown: [], typeBreakdown: [], totals: { orders: 0, grossSales: 0, discounts: 0, netSales: 0, tax: 0, tips: 0, total: 0 } };
+  }
+  async getReportProductMix(): Promise<ProductMixReport> {
+    return { topByQuantity: [], topByRevenue: [], categoryBreakdown: [], itemProfitability: [] };
+  }
+  async getReportLabor(): Promise<LaborReport> {
+    return { employeeSummary: [], dailyLaborTrend: [], laborVsRevenue: { totalLaborCost: 0, totalRevenue: 0, ratio: 0 }, overtimeFlags: [] };
+  }
+  async getReportCustomers(): Promise<CustomerReport> {
+    return { newVsReturning: { newCustomers: 0, returningCustomers: 0 }, topBySpend: [], tierDistribution: [], acquisitionTrend: [] };
+  }
 }
 
 import { DatabaseStorage } from "./database-storage";

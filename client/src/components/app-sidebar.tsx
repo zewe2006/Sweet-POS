@@ -12,6 +12,7 @@ import {
   Gift,
   Trophy,
   Clock,
+  LockKeyhole,
 } from "lucide-react";
 import {
   Sidebar,
@@ -43,6 +44,7 @@ const navItems = [
   { title: "Rewards", href: "/rewards", icon: Trophy },
   { title: "Time Clock", href: "/time-clock", icon: Clock },
   { title: "Menu", href: "/menu", icon: BookOpen },
+  { title: "Settlement", href: "/settlement", icon: LockKeyhole },
   { title: "Reports", href: "/reports", icon: BarChart3 },
   { title: "Promotions", href: "/promotions", icon: Megaphone },
   { title: "Settings", href: "/settings", icon: Settings },

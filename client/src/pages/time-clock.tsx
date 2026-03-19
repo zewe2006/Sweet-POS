@@ -1,17 +1,10 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import {
   Table,
   TableBody,
@@ -28,7 +21,7 @@ import {
   DialogFooter,
 } from "@/components/ui/dialog";
 import { useToast } from "@/hooks/use-toast";
-import { Clock, LogIn, LogOut, Timer, Coffee } from "lucide-react";
+import { Clock, LogIn, LogOut, Timer, Coffee, Delete, KeyRound } from "lucide-react";
 import type { User, Shift } from "@shared/schema";
 
 function LiveClock() {
@@ -77,13 +70,114 @@ function ElapsedTime({ clockIn }: { clockIn: string }) {
   return <span className="font-mono text-lg">{elapsed}</span>;
 }
 
+function PinPad({
+  pin,
+  onPinChange,
+  onSubmit,
+  loading,
+  error,
+}: {
+  pin: string;
+  onPinChange: (pin: string) => void;
+  onSubmit: () => void;
+  loading: boolean;
+  error: string;
+}) {
+  const handleDigit = (digit: string) => {
+    if (pin.length < 6) {
+      const newPin = pin + digit;
+      onPinChange(newPin);
+    }
+  };
+
+  const handleBackspace = () => {
+    onPinChange(pin.slice(0, -1));
+  };
+
+  const handleClear = () => {
+    onPinChange("");
+  };
+
+  return (
+    <div className="space-y-4">
+      {/* PIN display */}
+      <div className="flex items-center justify-center gap-1">
+        <KeyRound className="w-4 h-4 text-muted-foreground mr-2" />
+        <div className="flex gap-2">
+          {[0, 1, 2, 3, 4, 5].map((i) => (
+            <div
+              key={i}
+              className={`w-4 h-4 rounded-full border-2 transition-colors ${
+                i < pin.length
+                  ? "bg-primary border-primary"
+                  : "border-muted-foreground/30"
+              }`}
+            />
+          ))}
+        </div>
+      </div>
+
+      {error && (
+        <p className="text-sm text-destructive text-center">{error}</p>
+      )}
+
+      {/* Number pad */}
+      <div className="grid grid-cols-3 gap-2 max-w-[240px] mx-auto">
+        {["1", "2", "3", "4", "5", "6", "7", "8", "9"].map((digit) => (
+          <button
+            key={digit}
+            onClick={() => handleDigit(digit)}
+            className="h-14 rounded-lg border bg-card text-lg font-semibold hover:bg-accent transition-colors active:scale-95"
+            data-testid={`pin-${digit}`}
+          >
+            {digit}
+          </button>
+        ))}
+        <button
+          onClick={handleClear}
+          className="h-14 rounded-lg border bg-card text-sm font-medium text-muted-foreground hover:bg-accent transition-colors"
+          data-testid="pin-clear"
+        >
+          Clear
+        </button>
+        <button
+          onClick={() => handleDigit("0")}
+          className="h-14 rounded-lg border bg-card text-lg font-semibold hover:bg-accent transition-colors active:scale-95"
+          data-testid="pin-0"
+        >
+          0
+        </button>
+        <button
+          onClick={handleBackspace}
+          className="h-14 rounded-lg border bg-card flex items-center justify-center hover:bg-accent transition-colors"
+          data-testid="pin-backspace"
+        >
+          <Delete className="w-5 h-5 text-muted-foreground" />
+        </button>
+      </div>
+
+      <Button
+        className="w-full h-12 text-base"
+        onClick={onSubmit}
+        disabled={pin.length < 4 || loading}
+        data-testid="button-pin-submit"
+      >
+        {loading ? "Verifying..." : "Enter"}
+      </Button>
+    </div>
+  );
+}
+
 export default function TimeClock({ locationId }: { locationId: number }) {
-  const [selectedUserId, setSelectedUserId] = useState<string>("");
+  const [pin, setPin] = useState("");
+  const [pinError, setPinError] = useState("");
+  const [identifiedUser, setIdentifiedUser] = useState<Omit<User, "password"> | null>(null);
   const [clockOutDialogOpen, setClockOutDialogOpen] = useState(false);
   const [breakMinutes, setBreakMinutes] = useState("");
   const [clockOutNotes, setClockOutNotes] = useState("");
   const { toast } = useToast();
   const queryClient = useQueryClient();
+  const resetTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   // Fetch users
   const { data: users = [] } = useQuery<Omit<User, "password">[]>({
@@ -92,16 +186,16 @@ export default function TimeClock({ locationId }: { locationId: number }) {
 
   const activeUsers = users.filter((u) => u.isActive);
 
-  // Fetch active shift for selected user
+  // Fetch active shift for identified user
   const { data: activeShift } = useQuery<Shift | null>({
-    queryKey: ["/api/shifts/active", selectedUserId],
+    queryKey: ["/api/shifts/active", identifiedUser?.id],
     queryFn: async () => {
-      if (!selectedUserId) return null;
-      const res = await fetch(`/api/shifts/active/${selectedUserId}`);
+      if (!identifiedUser) return null;
+      const res = await fetch(`/api/shifts/active/${identifiedUser.id}`);
       return res.json();
     },
-    enabled: !!selectedUserId,
-    refetchInterval: 10000, // refresh every 10s
+    enabled: !!identifiedUser,
+    refetchInterval: 10000,
   });
 
   // Fetch recent shifts for this location
@@ -113,14 +207,48 @@ export default function TimeClock({ locationId }: { locationId: number }) {
     },
   });
 
+  // Auto-reset back to PIN screen after 30s of inactivity
+  useEffect(() => {
+    if (identifiedUser) {
+      if (resetTimerRef.current) clearTimeout(resetTimerRef.current);
+      resetTimerRef.current = setTimeout(() => {
+        setIdentifiedUser(null);
+        setPin("");
+      }, 30000);
+      return () => {
+        if (resetTimerRef.current) clearTimeout(resetTimerRef.current);
+      };
+    }
+  }, [identifiedUser]);
+
+  const handlePinSubmit = () => {
+    setPinError("");
+    const matched = activeUsers.find((u) => u.pin === pin);
+    if (matched) {
+      setIdentifiedUser(matched);
+      setPin("");
+    } else {
+      setPinError("Invalid PIN. Try again.");
+      setPin("");
+    }
+  };
+
+  // Also allow pressing Enter on the last digit
+  useEffect(() => {
+    if (pin.length === 6 && !identifiedUser) {
+      handlePinSubmit();
+    }
+  }, [pin]);
+
   // Clock in mutation
   const clockInMutation = useMutation({
     mutationFn: async () => {
+      if (!identifiedUser) throw new Error("No user identified");
       const res = await fetch("/api/shifts/clock-in", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          userId: Number(selectedUserId),
+          userId: identifiedUser.id,
           locationId,
         }),
       });
@@ -131,9 +259,14 @@ export default function TimeClock({ locationId }: { locationId: number }) {
       return res.json();
     },
     onSuccess: () => {
-      toast({ title: "Clocked In", description: "Shift started successfully." });
+      toast({ title: "Clocked In", description: `${identifiedUser?.name} is now on shift.` });
       queryClient.invalidateQueries({ queryKey: ["/api/shifts"] });
       queryClient.invalidateQueries({ queryKey: ["/api/shifts/active"] });
+      // Go back to PIN screen after clock in
+      setTimeout(() => {
+        setIdentifiedUser(null);
+        setPin("");
+      }, 3000);
     },
     onError: (err: Error) => {
       toast({ title: "Error", description: err.message, variant: "destructive" });
@@ -143,7 +276,8 @@ export default function TimeClock({ locationId }: { locationId: number }) {
   // Clock out mutation
   const clockOutMutation = useMutation({
     mutationFn: async () => {
-      const res = await fetch(`/api/shifts/clock-out/${selectedUserId}`, {
+      if (!identifiedUser) throw new Error("No user identified");
+      const res = await fetch(`/api/shifts/clock-out/${identifiedUser.id}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -160,23 +294,26 @@ export default function TimeClock({ locationId }: { locationId: number }) {
     onSuccess: (data) => {
       toast({
         title: "Clocked Out",
-        description: `Shift completed. Total: ${data.totalHours?.toFixed(2)} hours.`,
+        description: `${identifiedUser?.name} — ${data.totalHours?.toFixed(2)} hours.`,
       });
       setClockOutDialogOpen(false);
       setBreakMinutes("");
       setClockOutNotes("");
       queryClient.invalidateQueries({ queryKey: ["/api/shifts"] });
       queryClient.invalidateQueries({ queryKey: ["/api/shifts/active"] });
+      // Go back to PIN screen
+      setTimeout(() => {
+        setIdentifiedUser(null);
+        setPin("");
+      }, 3000);
     },
     onError: (err: Error) => {
       toast({ title: "Error", description: err.message, variant: "destructive" });
     },
   });
 
-  const selectedUser = activeUsers.find((u) => u.id === Number(selectedUserId));
   const isClockedIn = activeShift && activeShift.id;
 
-  // Get user name by id helper
   const getUserName = (userId: number) => {
     const user = users.find((u) => u.id === userId);
     return user?.name || `User #${userId}`;
@@ -191,8 +328,17 @@ export default function TimeClock({ locationId }: { locationId: number }) {
             <Clock className="w-6 h-6" />
             Time Clock
           </h1>
-          <p className="text-muted-foreground">Clock in and out for your shift</p>
+          <p className="text-muted-foreground">Enter your PIN to clock in or out</p>
         </div>
+        {identifiedUser && (
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => { setIdentifiedUser(null); setPin(""); }}
+          >
+            Switch User
+          </Button>
+        )}
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -201,32 +347,24 @@ export default function TimeClock({ locationId }: { locationId: number }) {
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
               <Timer className="w-5 h-5" />
-              Clock In / Out
+              {identifiedUser ? identifiedUser.name : "Clock In / Out"}
             </CardTitle>
           </CardHeader>
           <CardContent className="space-y-6">
             {/* Live Clock */}
             <LiveClock />
 
-            {/* User Selection */}
-            <div className="space-y-2">
-              <label className="text-sm font-medium">Select Employee</label>
-              <Select value={selectedUserId} onValueChange={setSelectedUserId}>
-                <SelectTrigger>
-                  <SelectValue placeholder="Choose employee..." />
-                </SelectTrigger>
-                <SelectContent>
-                  {activeUsers.map((user) => (
-                    <SelectItem key={user.id} value={String(user.id)}>
-                      {user.name} ({user.role})
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-
-            {/* Status & Actions */}
-            {selectedUserId && (
+            {!identifiedUser ? (
+              /* PIN Entry */
+              <PinPad
+                pin={pin}
+                onPinChange={(p) => { setPin(p); setPinError(""); }}
+                onSubmit={handlePinSubmit}
+                loading={false}
+                error={pinError}
+              />
+            ) : (
+              /* Status & Actions */
               <div className="space-y-4">
                 {isClockedIn ? (
                   <div className="space-y-4">
@@ -247,7 +385,7 @@ export default function TimeClock({ locationId }: { locationId: number }) {
                       </div>
                     </div>
                     <Button
-                      className="w-full"
+                      className="w-full h-12 text-base"
                       size="lg"
                       variant="destructive"
                       onClick={() => setClockOutDialogOpen(true)}
@@ -261,11 +399,11 @@ export default function TimeClock({ locationId }: { locationId: number }) {
                     <div className="bg-muted/50 border rounded-lg p-4 text-center">
                       <Badge variant="secondary">Not Clocked In</Badge>
                       <p className="text-sm text-muted-foreground mt-2">
-                        {selectedUser?.name} is not currently on shift
+                        {identifiedUser.name} is not currently on shift
                       </p>
                     </div>
                     <Button
-                      className="w-full"
+                      className="w-full h-12 text-base"
                       size="lg"
                       onClick={() => clockInMutation.mutate()}
                       disabled={clockInMutation.isPending}
@@ -275,12 +413,6 @@ export default function TimeClock({ locationId }: { locationId: number }) {
                     </Button>
                   </div>
                 )}
-              </div>
-            )}
-
-            {!selectedUserId && (
-              <div className="text-center text-muted-foreground py-4">
-                Select an employee to clock in or out
               </div>
             )}
           </CardContent>
@@ -422,7 +554,7 @@ export default function TimeClock({ locationId }: { locationId: number }) {
       <Dialog open={clockOutDialogOpen} onOpenChange={setClockOutDialogOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Clock Out - {selectedUser?.name}</DialogTitle>
+            <DialogTitle>Clock Out - {identifiedUser?.name}</DialogTitle>
           </DialogHeader>
           <div className="space-y-4 py-2">
             <div className="space-y-2">

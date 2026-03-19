@@ -547,6 +547,13 @@ export default function POS({ locationId }: { locationId: number }) {
                 {item.isPopular && (
                   <Star className="absolute top-1.5 right-1.5 w-3 h-3 fill-amber-400 text-amber-400" />
                 )}
+                {item.image && (
+                  <img
+                    src={item.image}
+                    alt={item.name}
+                    className="w-full aspect-square rounded-md object-cover mb-1.5"
+                  />
+                )}
                 <span className="text-sm font-medium leading-tight line-clamp-2">
                   {item.name}
                 </span>

@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { apiRequest, queryClient } from "@/lib/queryClient";
+import { ManagerPinDialog } from "@/components/manager-pin-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -103,6 +104,7 @@ export default function Orders({ locationId }: { locationId: number }) {
   const [sourceFilter, setSourceFilter] = useState<string>("all");
   const [selectedOrder, setSelectedOrder] = useState<OrderDetail | null>(null);
   const [detailOpen, setDetailOpen] = useState(false);
+  const [cancelTargetOrderId, setCancelTargetOrderId] = useState<number | null>(null);
 
   const { data: orders = [], isLoading } = useQuery<Order[]>({
     queryKey: ["/api/orders", { locationId }],
@@ -422,7 +424,7 @@ export default function Orders({ locationId }: { locationId: number }) {
                   <Button
                     variant="outline"
                     className="gap-1.5 text-red-700 border-red-300 hover:bg-red-50"
-                    onClick={() => handleCancelOrder(selectedOrder.id)}
+                    onClick={() => setCancelTargetOrderId(selectedOrder.id)}
                     disabled={updateStatusMutation.isPending}
                   >
                     <XCircle className="w-4 h-4" />
@@ -434,6 +436,23 @@ export default function Orders({ locationId }: { locationId: number }) {
           )}
         </DialogContent>
       </Dialog>
+
+      {/* Manager PIN for Cancel */}
+      <ManagerPinDialog
+        open={cancelTargetOrderId !== null}
+        onOpenChange={(open) => { if (!open) setCancelTargetOrderId(null); }}
+        actionDescription={`Cancel order #${orders.find((o) => o.id === cancelTargetOrderId)?.orderNumber ?? ""}`}
+        onAuthorized={(user) => {
+          if (cancelTargetOrderId !== null) {
+            updateStatusMutation.mutate({ orderId: cancelTargetOrderId, status: "cancelled" });
+            toast({
+              title: "Order Cancelled",
+              description: `Authorized by ${user.name}`,
+            });
+          }
+          setCancelTargetOrderId(null);
+        }}
+      />
     </div>
   );
 }

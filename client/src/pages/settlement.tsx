@@ -58,6 +58,7 @@ import {
   ArrowUpFromLine,
   Trash2,
 } from "lucide-react";
+import { ManagerPinDialog } from "@/components/manager-pin-dialog";
 import type { Settlement, User, CashDrawerTransaction } from "@shared/schema";
 
 interface SettlementPreview {
@@ -121,6 +122,7 @@ export default function SettlementPage({ locationId }: { locationId: number }) {
   const [notes, setNotes] = useState("");
   const [viewSettlement, setViewSettlement] = useState<Settlement | null>(null);
   const [historyTab, setHistoryTab] = useState(false);
+  const [voidTargetId, setVoidTargetId] = useState<number | null>(null);
 
   const { data: users = [] } = useQuery<User[]>({
     queryKey: ["/api/users"],
@@ -191,7 +193,6 @@ export default function SettlementPage({ locationId }: { locationId: number }) {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/cash-drawer", locationId, selectedDate] });
       queryClient.invalidateQueries({ queryKey: [`/api/settlements/preview/${locationId}/${selectedDate}`] });
-      toast({ title: "Transaction Voided" });
     },
   });
 
@@ -493,7 +494,7 @@ export default function SettlementPage({ locationId }: { locationId: number }) {
                                   size="icon"
                                   variant="ghost"
                                   className="h-5 w-5"
-                                  onClick={() => deleteCashDrawerMutation.mutate(txn.id)}
+                                  onClick={() => setVoidTargetId(txn.id)}
                                 >
                                   <Trash2 className="w-3 h-3 text-muted-foreground" />
                                 </Button>
@@ -635,6 +636,20 @@ export default function SettlementPage({ locationId }: { locationId: number }) {
           )}
         </ScrollArea>
       )}
+
+      {/* ── Manager PIN for Void ── */}
+      <ManagerPinDialog
+        open={voidTargetId !== null}
+        onOpenChange={(open) => { if (!open) setVoidTargetId(null); }}
+        actionDescription="Void cash drawer transaction"
+        onAuthorized={(user) => {
+          if (voidTargetId !== null) {
+            deleteCashDrawerMutation.mutate(voidTargetId);
+            toast({ title: "Transaction Voided", description: `Authorized by ${user.name}` });
+          }
+          setVoidTargetId(null);
+        }}
+      />
 
       {/* ── Cash In/Out Dialog ── */}
       <Dialog open={cashDrawerDialogOpen} onOpenChange={setCashDrawerDialogOpen}>

@@ -251,6 +251,11 @@ export class DatabaseStorage implements IStorage {
     return u;
   }
 
+  async getUserByPin(pin: string): Promise<User | undefined> {
+    const [u] = await db.select().from(users).where(eq(users.pin, pin));
+    return u;
+  }
+
   async createUser(data: InsertUser): Promise<User> {
     const [u] = await db.insert(users).values(data).returning();
     return u;
@@ -499,10 +504,10 @@ export class DatabaseStorage implements IStorage {
   // ============ REPORTS ============
 
   private getDateRange(startDate: string, endDate: string) {
-    const start = new Date(startDate);
-    start.setHours(0, 0, 0, 0);
-    const end = new Date(endDate);
-    end.setHours(23, 59, 59, 999);
+    const [sy, sm, sd] = startDate.split("-").map(Number);
+    const start = new Date(sy, sm - 1, sd, 0, 0, 0, 0);
+    const [ey, em, ed] = endDate.split("-").map(Number);
+    const end = new Date(ey, em - 1, ed, 23, 59, 59, 999);
     return { start, end };
   }
 

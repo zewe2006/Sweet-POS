@@ -660,10 +660,10 @@ export async function registerRoutes(
     const locationId = Number(req.params.locationId);
     const date = req.params.date;
 
-    const dayStart = new Date(date);
-    dayStart.setHours(0, 0, 0, 0);
-    const dayEnd = new Date(date);
-    dayEnd.setHours(23, 59, 59, 999);
+    // Parse date parts to build local-time boundaries
+    const [year, month, day] = date.split("-").map(Number);
+    const dayStart = new Date(year, month - 1, day, 0, 0, 0, 0);
+    const dayEnd = new Date(year, month - 1, day, 23, 59, 59, 999);
 
     // Get all orders for the day
     const allOrders = await storage.getOrders(locationId);
@@ -741,10 +741,9 @@ export async function registerRoutes(
     }
 
     // Re-calculate from orders to prevent tampering
-    const dayStart = new Date(date);
-    dayStart.setHours(0, 0, 0, 0);
-    const dayEnd = new Date(date);
-    dayEnd.setHours(23, 59, 59, 999);
+    const [cy, cm, cd] = date.split("-").map(Number);
+    const dayStart = new Date(cy, cm - 1, cd, 0, 0, 0, 0);
+    const dayEnd = new Date(cy, cm - 1, cd, 23, 59, 59, 999);
 
     const allOrders = await storage.getOrders(locationId);
     const dayOrders = allOrders.filter((o) => {
@@ -869,10 +868,9 @@ export async function registerRoutes(
     const date = String(req.query.date || new Date().toISOString().split("T")[0]);
     if (!locationId) return res.status(400).json({ message: "locationId is required" });
 
-    const dayStart = new Date(date);
-    dayStart.setHours(0, 0, 0, 0);
-    const dayEnd = new Date(date);
-    dayEnd.setHours(23, 59, 59, 999);
+    const [hy, hm, hd] = date.split("-").map(Number);
+    const dayStart = new Date(hy, hm - 1, hd, 0, 0, 0, 0);
+    const dayEnd = new Date(hy, hm - 1, hd, 23, 59, 59, 999);
 
     const orders = await storage.getOrders(locationId);
     const dayOrders = orders.filter((o) => {
@@ -1164,6 +1162,21 @@ export async function registerRoutes(
     // Update last login
     await storage.updateUser(user.id, { lastLogin: new Date() } as any);
     // Return user without password
+    const { password: _, ...safeUser } = user;
+    res.json(safeUser);
+  });
+
+  // POST /api/auth/verify-manager-pin - verify a manager/admin PIN for authorization
+  app.post("/api/auth/verify-manager-pin", async (req, res) => {
+    const { pin } = req.body;
+    if (!pin) return res.status(400).json({ message: "PIN is required" });
+    const user = await storage.getUserByPin(pin);
+    if (!user || !user.isActive) {
+      return res.status(401).json({ message: "Invalid PIN" });
+    }
+    if (user.role !== "manager" && user.role !== "admin") {
+      return res.status(403).json({ message: "Manager authorization required" });
+    }
     const { password: _, ...safeUser } = user;
     res.json(safeUser);
   });

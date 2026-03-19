@@ -366,3 +366,20 @@ export const settlements = pgTable("settlements", {
 export const insertSettlementSchema = createInsertSchema(settlements).omit({ id: true, createdAt: true });
 export type InsertSettlement = z.infer<typeof insertSettlementSchema>;
 export type Settlement = typeof settlements.$inferSelect;
+
+// ============ CASH DRAWER TRANSACTIONS ============
+export const cashDrawerTransactions = pgTable("cash_drawer_transactions", {
+  id: serial("id").primaryKey(),
+  locationId: integer("location_id").notNull(),
+  type: text("type").notNull(), // 'cash_in' | 'cash_out'
+  amount: real("amount").notNull(), // always positive
+  reason: text("reason").notNull(), // e.g. "Starting float", "Bank deposit", "Petty cash", "Change added"
+  performedBy: text("performed_by"), // name of person
+  notes: text("notes"),
+  date: text("date").notNull(), // YYYY-MM-DD for grouping by day
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export const insertCashDrawerTransactionSchema = createInsertSchema(cashDrawerTransactions).omit({ id: true, createdAt: true });
+export type InsertCashDrawerTransaction = z.infer<typeof insertCashDrawerTransactionSchema>;
+export type CashDrawerTransaction = typeof cashDrawerTransactions.$inferSelect;

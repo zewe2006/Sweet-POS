@@ -160,6 +160,11 @@ export interface IStorage {
   createSettlement(data: import("@shared/schema").InsertSettlement): Promise<import("@shared/schema").Settlement>;
   updateSettlement(id: number, data: Partial<import("@shared/schema").InsertSettlement>): Promise<import("@shared/schema").Settlement | undefined>;
 
+  // Cash Drawer Transactions
+  getCashDrawerTransactions(locationId: number, date: string): Promise<import("@shared/schema").CashDrawerTransaction[]>;
+  createCashDrawerTransaction(data: import("@shared/schema").InsertCashDrawerTransaction): Promise<import("@shared/schema").CashDrawerTransaction>;
+  deleteCashDrawerTransaction(id: number): Promise<boolean>;
+
   // Utilities
   getNextOrderNumber(locationId: number): Promise<string>;
   getDailySales(locationId: number, date: string): Promise<{ totalOrders: number; totalRevenue: number; avgOrderValue: number }>;
@@ -1388,6 +1393,11 @@ export class MemStorage implements IStorage {
   async getSettlementByDate() { return undefined; }
   async createSettlement(data: any) { return { id: 0, ...data } as any; }
   async updateSettlement() { return undefined; }
+
+  // ============ CASH DRAWER (stubs) ============
+  async getCashDrawerTransactions() { return []; }
+  async createCashDrawerTransaction(data: any) { return { id: 0, ...data } as any; }
+  async deleteCashDrawerTransaction() { return false; }
 
   // ============ REPORTS (stubs) ============
   async getReportDashboard(): Promise<DashboardReport> {

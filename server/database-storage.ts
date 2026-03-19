@@ -5,6 +5,7 @@ import {
   modifierGroups, modifiers, orders, orderItems,
   promotions, users, customers, rewardConfig,
   giftCards, customerTransactions, shifts, settlements,
+  cashDrawerTransactions,
 } from "@shared/schema";
 import type {
   Location, InsertLocation,
@@ -23,6 +24,7 @@ import type {
   CustomerTransaction, InsertCustomerTransaction,
   Shift, InsertShift,
   Settlement, InsertSettlement,
+  CashDrawerTransaction, InsertCashDrawerTransaction,
 } from "@shared/schema";
 import type { IStorage, DashboardReport, SalesReport, ProductMixReport, LaborReport, CustomerReport } from "./storage";
 
@@ -447,6 +449,27 @@ export class DatabaseStorage implements IStorage {
   async updateSettlement(id: number, data: Partial<InsertSettlement>): Promise<Settlement | undefined> {
     const [row] = await db.update(settlements).set(data).where(eq(settlements.id, id)).returning();
     return row;
+  }
+
+  // ============ CASH DRAWER TRANSACTIONS ============
+
+  async getCashDrawerTransactions(locationId: number, date: string): Promise<CashDrawerTransaction[]> {
+    return db.select().from(cashDrawerTransactions)
+      .where(and(
+        eq(cashDrawerTransactions.locationId, locationId),
+        eq(cashDrawerTransactions.date, date),
+      ))
+      .orderBy(desc(cashDrawerTransactions.createdAt));
+  }
+
+  async createCashDrawerTransaction(data: InsertCashDrawerTransaction): Promise<CashDrawerTransaction> {
+    const [row] = await db.insert(cashDrawerTransactions).values(data).returning();
+    return row;
+  }
+
+  async deleteCashDrawerTransaction(id: number): Promise<boolean> {
+    const [row] = await db.delete(cashDrawerTransactions).where(eq(cashDrawerTransactions.id, id)).returning();
+    return !!row;
   }
 
   async getDailySales(locationId: number, date: string): Promise<{ totalOrders: number; totalRevenue: number; avgOrderValue: number }> {

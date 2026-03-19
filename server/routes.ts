@@ -238,9 +238,11 @@ export async function registerRoutes(
       paymentIntentId: null,
       notes: data.notes ?? null,
       externalOrderId: null,
-      // POS orders go straight to "completed" (printed, no kitchen display);
+      // POS orders with payment go to "closed"; unpaid POS orders are "open"
       // external/app orders start as "pending" for confirmation
-      status: data.source === "pos" ? "completed" : "pending",
+      status: data.source === "pos"
+        ? (data.paymentMethod && data.paymentMethod !== "unpaid" ? "closed" : "open")
+        : "pending",
     });
 
     // Create order items
@@ -266,7 +268,7 @@ export async function registerRoutes(
   app.patch("/api/orders/:id/status", async (req, res) => {
     const id = Number(req.params.id);
     const { status } = req.body;
-    const validStatuses = ["pending", "confirmed", "preparing", "ready", "completed", "cancelled"];
+    const validStatuses = ["pending", "confirmed", "preparing", "ready", "completed", "cancelled", "open", "closed"];
     if (!status || !validStatuses.includes(status)) {
       return res.status(400).json({ message: `Invalid status. Must be one of: ${validStatuses.join(", ")}` });
     }
@@ -695,7 +697,12 @@ export async function registerRoutes(
     const totalLaborHours = Math.round(dayShifts.reduce((s, sh) => s + (sh.totalHours || 0), 0) * 100) / 100;
 
     // Check for unfulfilled orders
-    const unfulfilledOrders = dayOrders.filter((o) => o.status === "preparing" || o.status === "pending" || o.status === "confirmed");
+    const unfulfilledOrders = dayOrders.filter((o) => o.status === "preparing" || o.status === "pending" || o.status === "confirmed" || o.status === "open");
+
+    // Get cash drawer transactions for the day
+    const cashDrawerTxns = await storage.getCashDrawerTransactions(locationId, date);
+    const totalCashIn = Math.round(cashDrawerTxns.filter(t => t.type === "cash_in").reduce((s, t) => s + t.amount, 0) * 100) / 100;
+    const totalCashOut = Math.round(cashDrawerTxns.filter(t => t.type === "cash_out").reduce((s, t) => s + t.amount, 0) * 100) / 100;
 
     res.json({
       date,
@@ -713,8 +720,10 @@ export async function registerRoutes(
       totalLaborHours,
       activeShifts: activeShifts.length,
       unfulfilledOrders: unfulfilledOrders.length,
-      // For cash reconciliation: expected = starting cash + cash received
+      // For cash reconciliation: expected = starting cash + cash sales + cash in - cash out
       expectedCashFromSales: sum(cashOrders),
+      totalCashIn,
+      totalCashOut,
     });
   });
 
@@ -758,7 +767,13 @@ export async function registerRoutes(
 
     const cashSalesTotal = sum(cashOrders);
     const startCash = startingCash ?? 200;
-    const expectedCash = Math.round((startCash + cashSalesTotal) * 100) / 100;
+
+    // Factor in cash drawer transactions
+    const cashDrawerTxns = await storage.getCashDrawerTransactions(locationId, date);
+    const totalCashIn = Math.round(cashDrawerTxns.filter(t => t.type === "cash_in").reduce((s, t) => s + t.amount, 0) * 100) / 100;
+    const totalCashOut = Math.round(cashDrawerTxns.filter(t => t.type === "cash_out").reduce((s, t) => s + t.amount, 0) * 100) / 100;
+
+    const expectedCash = Math.round((startCash + cashSalesTotal + totalCashIn - totalCashOut) * 100) / 100;
     const actual = actualCash ?? expectedCash;
     const diff = Math.round((actual - expectedCash) * 100) / 100;
 
@@ -797,6 +812,46 @@ export async function registerRoutes(
     });
 
     res.status(201).json(settlement);
+  });
+
+  // ============ CASH DRAWER TRANSACTIONS ============
+
+  // GET /api/cash-drawer?locationId=&date= - get transactions for a day
+  app.get("/api/cash-drawer", async (req, res) => {
+    const locationId = Number(req.query.locationId);
+    const date = String(req.query.date || new Date().toISOString().split("T")[0]);
+    if (!locationId) return res.status(400).json({ message: "locationId is required" });
+    const transactions = await storage.getCashDrawerTransactions(locationId, date);
+    res.json(transactions);
+  });
+
+  // POST /api/cash-drawer - add a cash in or cash out
+  app.post("/api/cash-drawer", async (req, res) => {
+    const { locationId, type, amount, reason, performedBy, notes, date } = req.body;
+    if (!locationId || !type || !amount || !reason) {
+      return res.status(400).json({ message: "locationId, type, amount, and reason are required" });
+    }
+    if (type !== "cash_in" && type !== "cash_out") {
+      return res.status(400).json({ message: "type must be 'cash_in' or 'cash_out'" });
+    }
+    const txn = await storage.createCashDrawerTransaction({
+      locationId,
+      type,
+      amount: Math.abs(amount),
+      reason,
+      performedBy: performedBy || null,
+      notes: notes || null,
+      date: date || new Date().toISOString().split("T")[0],
+    });
+    res.status(201).json(txn);
+  });
+
+  // DELETE /api/cash-drawer/:id - remove a transaction (void)
+  app.delete("/api/cash-drawer/:id", async (req, res) => {
+    const id = Number(req.params.id);
+    const deleted = await storage.deleteCashDrawerTransaction(id);
+    if (!deleted) return res.status(404).json({ message: "Transaction not found" });
+    res.json({ success: true });
   });
 
   // ============ REPORTS ============

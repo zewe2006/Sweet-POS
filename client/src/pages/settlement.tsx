@@ -6,6 +6,13 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Textarea } from "@/components/ui/textarea";
 import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
   Table,
   TableBody,
   TableCell,
@@ -41,13 +48,17 @@ import {
   FileText,
   Calendar,
   TrendingUp,
-  Users,
   Clock,
   XCircle,
   ChevronRight,
   Loader2,
+  Plus,
+  Minus,
+  ArrowDownToLine,
+  ArrowUpFromLine,
+  Trash2,
 } from "lucide-react";
-import type { Settlement, User } from "@shared/schema";
+import type { Settlement, User, CashDrawerTransaction } from "@shared/schema";
 
 interface SettlementPreview {
   date: string;
@@ -66,7 +77,12 @@ interface SettlementPreview {
   activeShifts: number;
   unfulfilledOrders: number;
   expectedCashFromSales: number;
+  totalCashIn: number;
+  totalCashOut: number;
 }
+
+const CASH_IN_REASONS = ["Starting float", "Change added", "Loan from safe", "Other"];
+const CASH_OUT_REASONS = ["Bank deposit", "Petty cash", "Vendor payment", "Safe drop", "Other"];
 
 function formatCurrency(amount: number) {
   return `$${amount.toFixed(2)}`;
@@ -82,11 +98,24 @@ function formatDate(dateStr: string) {
   });
 }
 
+function formatTime(dateStr: string) {
+  return new Date(dateStr).toLocaleTimeString("en-US", {
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true,
+  });
+}
+
 export default function SettlementPage({ locationId }: { locationId: number }) {
   const { toast } = useToast();
   const today = new Date().toISOString().split("T")[0];
   const [selectedDate, setSelectedDate] = useState(today);
   const [closeDialogOpen, setCloseDialogOpen] = useState(false);
+  const [cashDrawerDialogOpen, setCashDrawerDialogOpen] = useState(false);
+  const [cashDrawerType, setCashDrawerType] = useState<"cash_in" | "cash_out">("cash_in");
+  const [cashDrawerAmount, setCashDrawerAmount] = useState("");
+  const [cashDrawerReason, setCashDrawerReason] = useState("");
+  const [cashDrawerNotes, setCashDrawerNotes] = useState("");
   const [startingCash, setStartingCash] = useState("200.00");
   const [actualCash, setActualCash] = useState("");
   const [notes, setNotes] = useState("");
@@ -107,6 +136,15 @@ export default function SettlementPage({ locationId }: { locationId: number }) {
     queryKey: [`/api/settlements/preview/${locationId}/${selectedDate}`],
   });
 
+  // Cash drawer transactions for the selected date
+  const { data: cashDrawerTxns = [] } = useQuery<CashDrawerTransaction[]>({
+    queryKey: ["/api/cash-drawer", locationId, selectedDate],
+    queryFn: async () => {
+      const res = await apiRequest("GET", `/api/cash-drawer?locationId=${locationId}&date=${selectedDate}`);
+      return res.json();
+    },
+  });
+
   // Settlement history
   const { data: history = [] } = useQuery<Settlement[]>({
     queryKey: ["/api/settlements", locationId],
@@ -116,27 +154,68 @@ export default function SettlementPage({ locationId }: { locationId: number }) {
     },
   });
 
+  const cashDrawerMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", "/api/cash-drawer", {
+        locationId,
+        type: cashDrawerType,
+        amount: parseFloat(cashDrawerAmount) || 0,
+        reason: cashDrawerReason,
+        performedBy: "Manager",
+        notes: cashDrawerNotes || null,
+        date: selectedDate,
+      });
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/cash-drawer", locationId, selectedDate] });
+      queryClient.invalidateQueries({ queryKey: [`/api/settlements/preview/${locationId}/${selectedDate}`] });
+      setCashDrawerDialogOpen(false);
+      setCashDrawerAmount("");
+      setCashDrawerReason("");
+      setCashDrawerNotes("");
+      toast({
+        title: cashDrawerType === "cash_in" ? "Cash In Recorded" : "Cash Out Recorded",
+        description: `${formatCurrency(parseFloat(cashDrawerAmount) || 0)} — ${cashDrawerReason}`,
+      });
+    },
+    onError: (err: Error) => {
+      toast({ title: "Error", description: err.message, variant: "destructive" });
+    },
+  });
+
+  const deleteCashDrawerMutation = useMutation({
+    mutationFn: async (id: number) => {
+      await apiRequest("DELETE", `/api/cash-drawer/${id}`);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/cash-drawer", locationId, selectedDate] });
+      queryClient.invalidateQueries({ queryKey: [`/api/settlements/preview/${locationId}/${selectedDate}`] });
+      toast({ title: "Transaction Voided" });
+    },
+  });
+
   const closeDayMutation = useMutation({
     mutationFn: async () => {
       const res = await apiRequest("POST", "/api/settlements", {
         locationId,
         date: selectedDate,
-        closedByName: "Manager", // TODO: use actual logged-in user
+        closedByName: "Manager",
         startingCash: parseFloat(startingCash) || 200,
         actualCash: parseFloat(actualCash) || 0,
         notes: notes || null,
       });
       return res.json();
     },
-    onSuccess: (settlement) => {
+    onSuccess: (settlement: Settlement) => {
       queryClient.invalidateQueries({ queryKey: [`/api/settlements/check/${locationId}/${selectedDate}`] });
       queryClient.invalidateQueries({ queryKey: ["/api/settlements"] });
       setCloseDialogOpen(false);
       toast({
         title: "Day Closed",
         description: `Settlement for ${formatDate(selectedDate)} recorded. ${
-          settlement.cashDifference !== 0
-            ? `Cash ${settlement.cashDifference > 0 ? "over" : "short"}: ${formatCurrency(Math.abs(settlement.cashDifference))}`
+          (settlement.cashDifference ?? 0) !== 0
+            ? `Cash ${(settlement.cashDifference ?? 0) > 0 ? "over" : "short"}: ${formatCurrency(Math.abs(settlement.cashDifference ?? 0))}`
             : "Cash balanced."
         }`,
       });
@@ -148,8 +227,10 @@ export default function SettlementPage({ locationId }: { locationId: number }) {
 
   const isDayClosed = checkData?.closed;
   const existingSettlement = checkData?.settlement;
+  const totalCashIn = preview?.totalCashIn ?? 0;
+  const totalCashOut = preview?.totalCashOut ?? 0;
   const expectedCash = preview
-    ? Math.round(((parseFloat(startingCash) || 200) + preview.expectedCashFromSales) * 100) / 100
+    ? Math.round(((parseFloat(startingCash) || 200) + preview.expectedCashFromSales + totalCashIn - totalCashOut) * 100) / 100
     : 0;
   const cashDiff = actualCash
     ? Math.round((parseFloat(actualCash) - expectedCash) * 100) / 100
@@ -161,13 +242,21 @@ export default function SettlementPage({ locationId }: { locationId: number }) {
     setCloseDialogOpen(true);
   };
 
+  const openCashDrawerDialog = (type: "cash_in" | "cash_out") => {
+    setCashDrawerType(type);
+    setCashDrawerAmount("");
+    setCashDrawerReason("");
+    setCashDrawerNotes("");
+    setCashDrawerDialogOpen(true);
+  };
+
   return (
     <div className="flex flex-col h-full p-4 gap-4" data-testid="settlement-page">
       {/* Header */}
       <div className="flex items-center justify-between shrink-0">
         <div>
           <h1 className="text-xl font-bold">End-of-Day Settlement</h1>
-          <p className="text-sm text-muted-foreground">Close the day, count cash, and generate Z-report</p>
+          <p className="text-sm text-muted-foreground">Cash drawer management, close the day, and Z-report</p>
         </div>
         <div className="flex items-center gap-3">
           <Button
@@ -254,7 +343,7 @@ export default function SettlementPage({ locationId }: { locationId: number }) {
           </div>
         </ScrollArea>
       ) : (
-        /* ── Today's Z-Report Preview ── */
+        /* ── Today's View ── */
         <ScrollArea className="flex-1">
           {isDayClosed && existingSettlement ? (
             /* Day already closed */
@@ -303,12 +392,120 @@ export default function SettlementPage({ locationId }: { locationId: number }) {
                       <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
                       <span className="text-sm text-amber-700 dark:text-amber-400">
                         {preview.unfulfilledOrders} order{preview.unfulfilledOrders > 1 ? "s" : ""} still
-                        pending/preparing. Complete or cancel them before closing.
+                        open/preparing. Close or cancel them before settling.
                       </span>
                     </div>
                   )}
                 </div>
               )}
+
+              {/* Cash Drawer Actions */}
+              <Card>
+                <CardHeader className="p-4 pb-2">
+                  <div className="flex items-center justify-between">
+                    <CardTitle className="text-sm font-semibold flex items-center gap-2">
+                      <Banknote className="w-4 h-4" /> Cash Drawer
+                    </CardTitle>
+                    <div className="flex gap-2">
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="h-7 text-xs gap-1 text-emerald-700 border-emerald-300 hover:bg-emerald-50"
+                        onClick={() => openCashDrawerDialog("cash_in")}
+                      >
+                        <ArrowDownToLine className="w-3 h-3" /> Cash In
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="h-7 text-xs gap-1 text-red-700 border-red-300 hover:bg-red-50"
+                        onClick={() => openCashDrawerDialog("cash_out")}
+                      >
+                        <ArrowUpFromLine className="w-3 h-3" /> Cash Out
+                      </Button>
+                    </div>
+                  </div>
+                </CardHeader>
+                <CardContent className="p-4 pt-0">
+                  {/* Summary row */}
+                  <div className="flex items-center gap-4 mb-3 text-sm">
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-muted-foreground">Cash In:</span>
+                      <span className="font-mono font-medium text-emerald-700">{formatCurrency(totalCashIn)}</span>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-muted-foreground">Cash Out:</span>
+                      <span className="font-mono font-medium text-red-700">{formatCurrency(totalCashOut)}</span>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-muted-foreground">Net:</span>
+                      <span className={`font-mono font-medium ${(totalCashIn - totalCashOut) >= 0 ? "text-emerald-700" : "text-red-700"}`}>
+                        {(totalCashIn - totalCashOut) >= 0 ? "+" : ""}{formatCurrency(totalCashIn - totalCashOut)}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Transaction list */}
+                  {cashDrawerTxns.length === 0 ? (
+                    <p className="text-xs text-muted-foreground text-center py-3">
+                      No cash drawer transactions today. Use the buttons above to record cash in or cash out.
+                    </p>
+                  ) : (
+                    <div className="border rounded-md overflow-hidden">
+                      <Table>
+                        <TableHeader>
+                          <TableRow className="text-xs">
+                            <TableHead className="h-8 text-xs">Time</TableHead>
+                            <TableHead className="h-8 text-xs">Type</TableHead>
+                            <TableHead className="h-8 text-xs">Reason</TableHead>
+                            <TableHead className="h-8 text-xs text-right">Amount</TableHead>
+                            <TableHead className="h-8 text-xs w-[40px]"></TableHead>
+                          </TableRow>
+                        </TableHeader>
+                        <TableBody>
+                          {cashDrawerTxns.map((txn) => (
+                            <TableRow key={txn.id} className="text-xs">
+                              <TableCell className="py-1.5">
+                                {txn.createdAt ? formatTime(String(txn.createdAt)) : "—"}
+                              </TableCell>
+                              <TableCell className="py-1.5">
+                                {txn.type === "cash_in" ? (
+                                  <Badge className="text-[9px] h-4 bg-emerald-500/15 text-emerald-700 border-emerald-500/30">
+                                    IN
+                                  </Badge>
+                                ) : (
+                                  <Badge className="text-[9px] h-4 bg-red-500/15 text-red-700 border-red-500/30">
+                                    OUT
+                                  </Badge>
+                                )}
+                              </TableCell>
+                              <TableCell className="py-1.5">
+                                {txn.reason}
+                                {txn.notes && (
+                                  <span className="text-muted-foreground ml-1">— {txn.notes}</span>
+                                )}
+                              </TableCell>
+                              <TableCell className={`py-1.5 text-right font-mono ${txn.type === "cash_in" ? "text-emerald-700" : "text-red-700"}`}>
+                                {txn.type === "cash_in" ? "+" : "-"}{formatCurrency(txn.amount)}
+                              </TableCell>
+                              <TableCell className="py-1.5">
+                                <Button
+                                  size="icon"
+                                  variant="ghost"
+                                  className="h-5 w-5"
+                                  onClick={() => deleteCashDrawerMutation.mutate(txn.id)}
+                                >
+                                  <Trash2 className="w-3 h-3 text-muted-foreground" />
+                                </Button>
+                              </TableCell>
+                            </TableRow>
+                          ))}
+                        </TableBody>
+                      </Table>
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
 
               {/* Summary Cards */}
               <div className="grid grid-cols-4 gap-3">
@@ -439,6 +636,88 @@ export default function SettlementPage({ locationId }: { locationId: number }) {
         </ScrollArea>
       )}
 
+      {/* ── Cash In/Out Dialog ── */}
+      <Dialog open={cashDrawerDialogOpen} onOpenChange={setCashDrawerDialogOpen}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              {cashDrawerType === "cash_in" ? (
+                <>
+                  <ArrowDownToLine className="w-5 h-5 text-emerald-600" />
+                  Cash In
+                </>
+              ) : (
+                <>
+                  <ArrowUpFromLine className="w-5 h-5 text-red-600" />
+                  Cash Out
+                </>
+              )}
+            </DialogTitle>
+            <DialogDescription>
+              {cashDrawerType === "cash_in"
+                ? "Record cash being added to the register drawer."
+                : "Record cash being removed from the register drawer."}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div>
+              <label className="text-sm font-medium">Amount</label>
+              <Input
+                type="number"
+                step="0.01"
+                min="0.01"
+                placeholder="0.00"
+                value={cashDrawerAmount}
+                onChange={(e) => setCashDrawerAmount(e.target.value)}
+                className="mt-1 text-lg font-mono h-11"
+                autoFocus
+              />
+            </div>
+            <div>
+              <label className="text-sm font-medium">Reason</label>
+              <Select value={cashDrawerReason} onValueChange={setCashDrawerReason}>
+                <SelectTrigger className="mt-1">
+                  <SelectValue placeholder="Select a reason..." />
+                </SelectTrigger>
+                <SelectContent>
+                  {(cashDrawerType === "cash_in" ? CASH_IN_REASONS : CASH_OUT_REASONS).map((r) => (
+                    <SelectItem key={r} value={r}>{r}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div>
+              <label className="text-sm font-medium">Notes (optional)</label>
+              <Input
+                value={cashDrawerNotes}
+                onChange={(e) => setCashDrawerNotes(e.target.value)}
+                placeholder="Additional details..."
+                className="mt-1"
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setCashDrawerDialogOpen(false)}>
+              Cancel
+            </Button>
+            <Button
+              onClick={() => cashDrawerMutation.mutate()}
+              disabled={!cashDrawerAmount || !cashDrawerReason || parseFloat(cashDrawerAmount) <= 0 || cashDrawerMutation.isPending}
+              className={`gap-1.5 ${cashDrawerType === "cash_in" ? "bg-emerald-600 hover:bg-emerald-700" : "bg-red-600 hover:bg-red-700"}`}
+            >
+              {cashDrawerMutation.isPending ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : cashDrawerType === "cash_in" ? (
+                <ArrowDownToLine className="w-4 h-4" />
+              ) : (
+                <ArrowUpFromLine className="w-4 h-4" />
+              )}
+              {cashDrawerType === "cash_in" ? "Record Cash In" : "Record Cash Out"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       {/* ── Close Day Dialog ── */}
       <Dialog open={closeDialogOpen} onOpenChange={setCloseDialogOpen}>
         <DialogContent className="max-w-md">
@@ -476,6 +755,24 @@ export default function SettlementPage({ locationId }: { locationId: number }) {
                   </div>
                 </div>
               </div>
+
+              {/* Cash In/Out summary in reconciliation */}
+              {(totalCashIn > 0 || totalCashOut > 0) && (
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="text-xs text-muted-foreground">Cash In (Added)</label>
+                    <div className="mt-1 h-9 flex items-center px-3 rounded-md border bg-muted text-sm font-mono text-emerald-700">
+                      +{formatCurrency(totalCashIn)}
+                    </div>
+                  </div>
+                  <div>
+                    <label className="text-xs text-muted-foreground">Cash Out (Removed)</label>
+                    <div className="mt-1 h-9 flex items-center px-3 rounded-md border bg-muted text-sm font-mono text-red-700">
+                      -{formatCurrency(totalCashOut)}
+                    </div>
+                  </div>
+                </div>
+              )}
 
               <div className="pt-2 border-t">
                 <div className="flex items-center justify-between mb-2">

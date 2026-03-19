@@ -36,6 +36,7 @@ import {
   Wifi,
   CloudUpload,
   Clock,
+  Send,
 } from "lucide-react";
 import type { MenuItem, MenuCategory, Customer, GiftCard } from "@shared/schema";
 
@@ -386,6 +387,15 @@ export default function POS({ locationId }: { locationId: number }) {
       return;
     }
     createOrderMutation.mutate("cash");
+  };
+
+  const handleSendOrder = () => {
+    if (cart.length === 0) return;
+    if (!isOnline) {
+      handleOfflineOrder("unpaid");
+      return;
+    }
+    createOrderMutation.mutate("unpaid");
   };
 
   const openCashDrawer = async () => {
@@ -809,6 +819,18 @@ export default function POS({ locationId }: { locationId: number }) {
               <span data-testid="text-total">${total.toFixed(2)}</span>
             </div>
           </div>
+
+          {/* Send Order (no payment) */}
+          <Button
+            variant="secondary"
+            className="w-full h-11 gap-2"
+            onClick={handleSendOrder}
+            disabled={cart.length === 0 || createOrderMutation.isPending}
+            data-testid="button-send-order"
+          >
+            <Send className="w-4 h-4" />
+            Send Order (Pay Later)
+          </Button>
 
           {/* Payment Buttons */}
           <div className="flex gap-2 pt-1">

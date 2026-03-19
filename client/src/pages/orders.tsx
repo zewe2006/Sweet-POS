@@ -1,6 +1,6 @@
 import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { apiRequest } from "@/lib/queryClient";
+import { useQuery, useMutation } from "@tanstack/react-query";
+import { apiRequest, queryClient } from "@/lib/queryClient";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -26,24 +26,48 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { useToast } from "@/hooks/use-toast";
 import {
   Store,
   Truck,
   ShoppingBag,
   Smartphone,
   Globe,
-  ChevronDown,
-  ChevronUp,
+  ChevronRight,
+  CheckCircle2,
+  XCircle,
+  Loader2,
+  CreditCard,
+  Banknote,
 } from "lucide-react";
 import type { Order, OrderItem } from "@shared/schema";
 
 const statusConfig: Record<string, { label: string; className: string }> = {
+  open: { label: "Open", className: "bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400" },
   pending: { label: "Pending", className: "bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-300" },
   confirmed: { label: "Confirmed", className: "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400" },
   preparing: { label: "Preparing", className: "bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400" },
   ready: { label: "Ready", className: "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400" },
+  closed: { label: "Closed", className: "bg-teal-100 text-teal-700 dark:bg-teal-900/30 dark:text-teal-400" },
   completed: { label: "Completed", className: "bg-teal-100 text-teal-700 dark:bg-teal-900/30 dark:text-teal-400" },
   cancelled: { label: "Cancelled", className: "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400" },
+};
+
+// The next logical status for each status
+const nextStatus: Record<string, string> = {
+  open: "preparing",
+  pending: "preparing",
+  confirmed: "preparing",
+  preparing: "ready",
+  ready: "closed",
+};
+
+const nextStatusLabel: Record<string, string> = {
+  open: "Start Preparing",
+  pending: "Start Preparing",
+  confirmed: "Start Preparing",
+  preparing: "Mark Ready",
+  ready: "Close Order",
 };
 
 const sourceIcons: Record<string, typeof Store> = {
@@ -61,11 +85,20 @@ const typeLabels: Record<string, string> = {
   delivery: "Delivery",
 };
 
+const paymentLabels: Record<string, string> = {
+  stripe: "Card",
+  cash: "Cash",
+  gift_card: "Gift Card",
+  external: "External",
+  unpaid: "Unpaid",
+};
+
 interface OrderDetail extends Order {
   items: OrderItem[];
 }
 
 export default function Orders({ locationId }: { locationId: number }) {
+  const { toast } = useToast();
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [sourceFilter, setSourceFilter] = useState<string>("all");
   const [selectedOrder, setSelectedOrder] = useState<OrderDetail | null>(null);
@@ -76,6 +109,27 @@ export default function Orders({ locationId }: { locationId: number }) {
     queryFn: async () => {
       const res = await apiRequest("GET", `/api/orders?locationId=${locationId}`);
       return res.json();
+    },
+  });
+
+  const updateStatusMutation = useMutation({
+    mutationFn: async ({ orderId, status }: { orderId: number; status: string }) => {
+      const res = await apiRequest("PATCH", `/api/orders/${orderId}/status`, { status });
+      return res.json();
+    },
+    onSuccess: (updatedOrder: Order) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/orders"] });
+      if (selectedOrder && selectedOrder.id === updatedOrder.id) {
+        setSelectedOrder({ ...selectedOrder, status: updatedOrder.status, completedAt: updatedOrder.completedAt });
+      }
+      const statusLabel = statusConfig[updatedOrder.status || ""]?.label || updatedOrder.status;
+      toast({
+        title: `Order ${updatedOrder.orderNumber}`,
+        description: `Status updated to ${statusLabel}`,
+      });
+    },
+    onError: (err: Error) => {
+      toast({ title: "Error", description: err.message, variant: "destructive" });
     },
   });
 
@@ -94,6 +148,22 @@ export default function Orders({ locationId }: { locationId: number }) {
     } catch {
       // ignore
     }
+  };
+
+  const handleAdvanceStatus = (e: React.MouseEvent, orderId: number, currentStatus: string) => {
+    e.stopPropagation();
+    const next = nextStatus[currentStatus];
+    if (next) {
+      updateStatusMutation.mutate({ orderId, status: next });
+    }
+  };
+
+  const handleCompleteOrder = (orderId: number) => {
+    updateStatusMutation.mutate({ orderId, status: "closed" });
+  };
+
+  const handleCancelOrder = (orderId: number) => {
+    updateStatusMutation.mutate({ orderId, status: "cancelled" });
   };
 
   const formatTime = (date: Date | string | null) => {
@@ -146,17 +216,18 @@ export default function Orders({ locationId }: { locationId: number }) {
                 <TableHead className="w-[90px]">Source</TableHead>
                 <TableHead className="w-[80px]">Type</TableHead>
                 <TableHead>Customer</TableHead>
-                <TableHead className="w-[60px] text-center">Items</TableHead>
+                <TableHead className="w-[80px]">Payment</TableHead>
                 <TableHead className="w-[80px] text-right">Total</TableHead>
                 <TableHead className="w-[100px]">Status</TableHead>
                 <TableHead className="w-[130px]">Time</TableHead>
+                <TableHead className="w-[100px]"></TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {isLoading ? (
                 Array.from({ length: 5 }).map((_, i) => (
                   <TableRow key={i}>
-                    {Array.from({ length: 8 }).map((_, j) => (
+                    {Array.from({ length: 9 }).map((_, j) => (
                       <TableCell key={j}>
                         <div className="h-4 bg-muted rounded animate-pulse" />
                       </TableCell>
@@ -165,7 +236,7 @@ export default function Orders({ locationId }: { locationId: number }) {
                 ))
               ) : filteredOrders.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={8} className="text-center py-12 text-muted-foreground">
+                  <TableCell colSpan={9} className="text-center py-12 text-muted-foreground">
                     No orders found
                   </TableCell>
                 </TableRow>
@@ -173,6 +244,8 @@ export default function Orders({ locationId }: { locationId: number }) {
                 filteredOrders.map((order) => {
                   const SourceIcon = sourceIcons[order.source] || Store;
                   const statusCfg = statusConfig[order.status || ""] || statusConfig.pending;
+                  const canAdvance = !!nextStatus[order.status || ""];
+                  const isUnpaid = order.paymentMethod === "unpaid" || !order.paymentMethod;
                   return (
                     <TableRow
                       key={order.id}
@@ -193,7 +266,15 @@ export default function Orders({ locationId }: { locationId: number }) {
                         {typeLabels[order.type || ""] || order.type}
                       </TableCell>
                       <TableCell className="text-sm">{order.customerName || "—"}</TableCell>
-                      <TableCell className="text-center text-sm">—</TableCell>
+                      <TableCell>
+                        {isUnpaid ? (
+                          <Badge variant="destructive" className="text-[10px]">Unpaid</Badge>
+                        ) : (
+                          <span className="text-xs text-muted-foreground">
+                            {paymentLabels[order.paymentMethod || ""] || order.paymentMethod}
+                          </span>
+                        )}
+                      </TableCell>
                       <TableCell className="text-right font-medium text-sm">
                         ${order.total.toFixed(2)}
                       </TableCell>
@@ -207,6 +288,20 @@ export default function Orders({ locationId }: { locationId: number }) {
                       </TableCell>
                       <TableCell className="text-xs text-muted-foreground">
                         {formatTime(order.createdAt)}
+                      </TableCell>
+                      <TableCell>
+                        {canAdvance && (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="h-6 text-[10px] px-2"
+                            onClick={(e) => handleAdvanceStatus(e, order.id, order.status || "")}
+                            disabled={updateStatusMutation.isPending}
+                          >
+                            {nextStatusLabel[order.status || ""] || "Next"}
+                            <ChevronRight className="w-3 h-3 ml-0.5" />
+                          </Button>
+                        )}
                       </TableCell>
                     </TableRow>
                   );
@@ -231,6 +326,14 @@ export default function Orders({ locationId }: { locationId: number }) {
                 </Badge>
                 <span className="text-xs text-muted-foreground capitalize">{selectedOrder.source}</span>
                 <span className="text-xs text-muted-foreground">{typeLabels[selectedOrder.type || ""] || selectedOrder.type}</span>
+                {(selectedOrder.paymentMethod === "unpaid" || !selectedOrder.paymentMethod) && (
+                  <Badge variant="destructive" className="text-[10px]">Unpaid</Badge>
+                )}
+                {selectedOrder.paymentMethod && selectedOrder.paymentMethod !== "unpaid" && (
+                  <Badge variant="outline" className="text-[10px]">
+                    {paymentLabels[selectedOrder.paymentMethod] || selectedOrder.paymentMethod}
+                  </Badge>
+                )}
               </div>
               {selectedOrder.customerName && (
                 <div className="text-sm">
@@ -282,8 +385,51 @@ export default function Orders({ locationId }: { locationId: number }) {
                 </div>
               </div>
               <div className="text-xs text-muted-foreground">
-                {formatTime(selectedOrder.createdAt)} · {selectedOrder.paymentMethod || "—"}
+                {formatTime(selectedOrder.createdAt)}
               </div>
+
+              {/* Action Buttons */}
+              {selectedOrder.status !== "completed" && selectedOrder.status !== "closed" && selectedOrder.status !== "cancelled" && (
+                <div className="flex gap-2 pt-2 border-t">
+                  {nextStatus[selectedOrder.status || ""] && (
+                    <Button
+                      className="flex-1 gap-1.5"
+                      onClick={() => {
+                        const next = nextStatus[selectedOrder.status || ""];
+                        if (next) updateStatusMutation.mutate({ orderId: selectedOrder.id, status: next });
+                      }}
+                      disabled={updateStatusMutation.isPending}
+                    >
+                      {updateStatusMutation.isPending ? (
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                      ) : (
+                        <ChevronRight className="w-4 h-4" />
+                      )}
+                      {nextStatusLabel[selectedOrder.status || ""] || "Advance"}
+                    </Button>
+                  )}
+                  {selectedOrder.status !== "ready" && (
+                    <Button
+                      variant="outline"
+                      className="gap-1.5 text-teal-700 border-teal-300 hover:bg-teal-50"
+                      onClick={() => handleCompleteOrder(selectedOrder.id)}
+                      disabled={updateStatusMutation.isPending}
+                    >
+                      <CheckCircle2 className="w-4 h-4" />
+                      Close
+                    </Button>
+                  )}
+                  <Button
+                    variant="outline"
+                    className="gap-1.5 text-red-700 border-red-300 hover:bg-red-50"
+                    onClick={() => handleCancelOrder(selectedOrder.id)}
+                    disabled={updateStatusMutation.isPending}
+                  >
+                    <XCircle className="w-4 h-4" />
+                    Cancel
+                  </Button>
+                </div>
+              )}
             </div>
           )}
         </DialogContent>

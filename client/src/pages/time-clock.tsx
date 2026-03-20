@@ -21,7 +21,9 @@ import {
   DialogFooter,
 } from "@/components/ui/dialog";
 import { useToast } from "@/hooks/use-toast";
-import { Clock, LogIn, LogOut, Timer, Coffee, Delete, KeyRound } from "lucide-react";
+import { Label } from "@/components/ui/label";
+import { Clock, LogIn, LogOut, Timer, Coffee, Delete, KeyRound, Pencil, Trash2 } from "lucide-react";
+import { apiRequest } from "@/lib/queryClient";
 import type { User, Shift } from "@shared/schema";
 
 function LiveClock() {
@@ -312,6 +314,65 @@ export default function TimeClock({ locationId }: { locationId: number }) {
     },
   });
 
+  // Admin adjust shift
+  const [editShift, setEditShift] = useState<Shift | null>(null);
+  const [editClockIn, setEditClockIn] = useState("");
+  const [editClockOut, setEditClockOut] = useState("");
+  const [editBreak, setEditBreak] = useState("");
+  const [editNotes, setEditNotes] = useState("");
+
+  const openEditDialog = (shift: Shift) => {
+    setEditShift(shift);
+    // Format datetime-local value
+    const fmtDT = (d: Date | string | null) => {
+      if (!d) return "";
+      const dt = new Date(d);
+      return dt.getFullYear() + "-" +
+        String(dt.getMonth() + 1).padStart(2, "0") + "-" +
+        String(dt.getDate()).padStart(2, "0") + "T" +
+        String(dt.getHours()).padStart(2, "0") + ":" +
+        String(dt.getMinutes()).padStart(2, "0");
+    };
+    setEditClockIn(fmtDT(shift.clockIn));
+    setEditClockOut(shift.clockOut ? fmtDT(shift.clockOut) : "");
+    setEditBreak(String(shift.breakMinutes ?? 0));
+    setEditNotes(shift.notes ?? "");
+  };
+
+  const adjustMutation = useMutation({
+    mutationFn: async () => {
+      if (!editShift) throw new Error("No shift selected");
+      const body: Record<string, unknown> = {};
+      if (editClockIn) body.clockIn = new Date(editClockIn).toISOString();
+      if (editClockOut) body.clockOut = new Date(editClockOut).toISOString();
+      body.breakMinutes = Number(editBreak) || 0;
+      body.notes = editNotes || null;
+      const res = await apiRequest("PATCH", `/api/shifts/${editShift.id}`, body);
+      return res.json();
+    },
+    onSuccess: () => {
+      toast({ title: "Shift Updated", description: "Time clock entry has been adjusted." });
+      setEditShift(null);
+      queryClient.invalidateQueries({ queryKey: ["/api/shifts"] });
+    },
+    onError: (err: Error) => {
+      toast({ title: "Error", description: err.message, variant: "destructive" });
+    },
+  });
+
+  const deleteMutation = useMutation({
+    mutationFn: async (id: number) => {
+      await apiRequest("DELETE", `/api/shifts/${id}`);
+    },
+    onSuccess: () => {
+      toast({ title: "Shift Deleted", description: "Time clock entry has been removed." });
+      queryClient.invalidateQueries({ queryKey: ["/api/shifts"] });
+    },
+    onError: (err: Error) => {
+      toast({ title: "Error", description: err.message, variant: "destructive" });
+    },
+  });
+
   const isClockedIn = activeShift && activeShift.id;
 
   const getUserName = (userId: number) => {
@@ -484,6 +545,7 @@ export default function TimeClock({ locationId }: { locationId: number }) {
                 <TableHead>Total Hours</TableHead>
                 <TableHead>Status</TableHead>
                 <TableHead>Notes</TableHead>
+                <TableHead className="text-right">Actions</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -536,11 +598,35 @@ export default function TimeClock({ locationId }: { locationId: number }) {
                   <TableCell className="max-w-[200px] truncate">
                     {shift.notes || "—"}
                   </TableCell>
+                  <TableCell className="text-right">
+                    <div className="flex items-center justify-end gap-1">
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-7 w-7"
+                        onClick={() => openEditDialog(shift)}
+                      >
+                        <Pencil className="w-3.5 h-3.5" />
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-7 w-7 text-destructive hover:text-destructive"
+                        onClick={() => {
+                          if (confirm(`Delete shift for ${getUserName(shift.userId)}?`)) {
+                            deleteMutation.mutate(shift.id);
+                          }
+                        }}
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </Button>
+                    </div>
+                  </TableCell>
                 </TableRow>
               ))}
               {recentShifts.length === 0 && (
                 <TableRow>
-                  <TableCell colSpan={7} className="text-center text-muted-foreground py-8">
+                  <TableCell colSpan={8} className="text-center text-muted-foreground py-8">
                     No shifts recorded yet
                   </TableCell>
                 </TableRow>
@@ -549,6 +635,64 @@ export default function TimeClock({ locationId }: { locationId: number }) {
           </Table>
         </CardContent>
       </Card>
+
+      {/* Edit Shift Dialog */}
+      <Dialog open={!!editShift} onOpenChange={(open) => !open && setEditShift(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Adjust Time Clock — {editShift ? getUserName(editShift.userId) : ""}</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4 py-2">
+            <div className="space-y-2">
+              <Label>Clock In</Label>
+              <Input
+                type="datetime-local"
+                value={editClockIn}
+                onChange={(e) => setEditClockIn(e.target.value)}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>Clock Out</Label>
+              <Input
+                type="datetime-local"
+                value={editClockOut}
+                onChange={(e) => setEditClockOut(e.target.value)}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>Break (minutes)</Label>
+              <Input
+                type="number"
+                placeholder="0"
+                value={editBreak}
+                onChange={(e) => setEditBreak(e.target.value)}
+                min="0"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>Notes</Label>
+              <Textarea
+                placeholder="Reason for adjustment..."
+                value={editNotes}
+                onChange={(e) => setEditNotes(e.target.value)}
+                rows={2}
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setEditShift(null)}>
+              Cancel
+            </Button>
+            <Button
+              onClick={() => adjustMutation.mutate()}
+              disabled={adjustMutation.isPending}
+            >
+              <Pencil className="w-4 h-4 mr-2" />
+              {adjustMutation.isPending ? "Saving..." : "Save Changes"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* Clock Out Dialog */}
       <Dialog open={clockOutDialogOpen} onOpenChange={setClockOutDialogOpen}>

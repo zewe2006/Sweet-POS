@@ -34,6 +34,7 @@ import {
   UserPlus,
   UserCheck,
   Loader2,
+  Building2,
 } from "lucide-react";
 import {
   BarChart,
@@ -77,6 +78,7 @@ interface SalesReport {
   sourceBreakdown: Array<{ source: string; count: number; total: number }>;
   typeBreakdown: Array<{ type: string; count: number; total: number }>;
   totals: { orders: number; grossSales: number; discounts: number; netSales: number; tax: number; tips: number; total: number };
+  itemsSoldByDay: Array<{ date: string; items: Array<{ name: string; quantity: number; revenue: number }> }>;
 }
 
 interface ProductMixReport {
@@ -89,9 +91,10 @@ interface ProductMixReport {
 interface LaborReport {
   employeeSummary: Array<{
     userId: number; name: string; role: string; hoursWorked: number;
-    breakMinutes: number; laborCost: number; shiftsCount: number;
+    breakMinutes: number; laborCost: number; shiftsCount: number; tips: number;
   }>;
   dailyLaborTrend: Array<{ date: string; totalHours: number; totalCost: number }>;
+  totalTips: number;
   laborVsRevenue: { totalLaborCost: number; totalRevenue: number; ratio: number };
   overtimeFlags: Array<{ userId: number; name: string; date: string; hoursWorked: number; type: string }>;
 }
@@ -101,6 +104,23 @@ interface CustomerReport {
   topBySpend: Array<{ id: number; name: string; phone: string | null; lifetimeSpend: number; visitCount: number; tier: string }>;
   tierDistribution: Array<{ tier: string; count: number }>;
   acquisitionTrend: Array<{ date: string; newCustomers: number }>;
+}
+
+interface EnterpriseReport {
+  overview: {
+    totalRevenue: number; totalOrders: number; avgOrderValue: number;
+    totalTips: number; totalLaborCost: number; laborRatio: number;
+  };
+  locationBreakdown: Array<{
+    locationId: number; locationName: string; revenue: number;
+    orders: number; avgOrderValue: number; tips: number;
+    laborCost: number; laborRatio: number;
+  }>;
+  dailyTrend: Array<Record<string, string | number>>;
+  paymentBreakdown: Array<{ method: string; count: number; total: number }>;
+  sourceBreakdown: Array<{ source: string; count: number; total: number }>;
+  topItems: Array<{ name: string; quantity: number; revenue: number }>;
+  itemsSoldByDay: Array<{ date: string; items: Array<{ name: string; quantity: number; revenue: number }> }>;
 }
 
 // ============ CONSTANTS ============
@@ -119,6 +139,14 @@ const TIER_COLORS: Record<string, string> = {
   gold: "#FFD700",
   platinum: "#E5E4E2",
 };
+
+const LOCATION_COLORS = [
+  "hsl(12, 78%, 60%)",
+  "hsl(173, 58%, 39%)",
+  "hsl(262, 60%, 52%)",
+  "hsl(43, 74%, 49%)",
+  "hsl(200, 70%, 50%)",
+];
 
 const TOOLTIP_STYLE = {
   backgroundColor: "hsl(var(--card))",
@@ -284,6 +312,20 @@ export default function Reports({ locationId }: { locationId: number }) {
     enabled: activeTab === "customers",
   });
 
+  const { data: enterprise, isLoading: enterpriseLoading } = useQuery<EnterpriseReport>({
+    queryKey: ["/api/reports/enterprise", { startDate, endDate }],
+    queryFn: async () => {
+      const res = await apiRequest("GET", `/api/reports/enterprise?startDate=${startDate}&endDate=${endDate}`);
+      return res.json();
+    },
+    enabled: activeTab === "enterprise",
+  });
+
+  const locationNames = useMemo(() => {
+    if (!enterprise) return [];
+    return enterprise.locationBreakdown.map(l => l.locationName);
+  }, [enterprise]);
+
   // Filtered hourly data for business hours
   const filteredHourly = useMemo(
     () => (dashboard?.hourlyDistribution || []).filter((h) => h.hour >= 7 && h.hour <= 22),
@@ -315,6 +357,10 @@ export default function Reports({ locationId }: { locationId: number }) {
             <TabsTrigger value="customers" data-testid="tab-customers">
               <Users className="w-3.5 h-3.5 mr-1.5" />
               Customers
+            </TabsTrigger>
+            <TabsTrigger value="enterprise" data-testid="tab-enterprise">
+              <Building2 className="w-3.5 h-3.5 mr-1.5" />
+              Enterprise
             </TabsTrigger>
           </TabsList>
 
@@ -688,6 +734,43 @@ export default function Reports({ locationId }: { locationId: number }) {
                     </CardContent>
                   </Card>
                 </div>
+
+                {/* Items Sold by Day */}
+                {sales.itemsSoldByDay.length > 0 && (
+                  <Card>
+                    <CardHeader className="p-4 pb-2">
+                      <CardTitle className="text-sm font-semibold">Items Sold by Day</CardTitle>
+                    </CardHeader>
+                    <CardContent className="p-0">
+                      <Table>
+                        <TableHeader>
+                          <TableRow>
+                            <TableHead>Date</TableHead>
+                            <TableHead>Item</TableHead>
+                            <TableHead className="text-right">Qty</TableHead>
+                            <TableHead className="text-right">Revenue</TableHead>
+                          </TableRow>
+                        </TableHeader>
+                        <TableBody>
+                          {sales.itemsSoldByDay.map((day) =>
+                            day.items.map((item, idx) => (
+                              <TableRow key={`${day.date}-${item.name}`}>
+                                {idx === 0 ? (
+                                  <TableCell rowSpan={day.items.length} className="text-sm font-medium align-top border-r">
+                                    {format(new Date(day.date + "T00:00:00"), "MMM d, yyyy")}
+                                  </TableCell>
+                                ) : null}
+                                <TableCell className="text-sm">{item.name}</TableCell>
+                                <TableCell className="text-right tabular-nums">{item.quantity}</TableCell>
+                                <TableCell className="text-right tabular-nums">{fmtCurrency(item.revenue)}</TableCell>
+                              </TableRow>
+                            ))
+                          )}
+                        </TableBody>
+                      </Table>
+                    </CardContent>
+                  </Card>
+                )}
               </>
             )}
           </TabsContent>
@@ -873,52 +956,31 @@ export default function Reports({ locationId }: { locationId: number }) {
             ) : (
               <>
                 {/* Labor KPIs */}
-                <div className="grid grid-cols-3 gap-3">
-                  <Card>
-                    <CardContent className="p-4">
-                      <div className="flex items-center gap-3">
-                        <div className="w-9 h-9 rounded-lg bg-blue-500/10 flex items-center justify-center">
-                          <Clock className="w-4.5 h-4.5 text-blue-500" />
-                        </div>
-                        <div>
-                          <p className="text-xs text-muted-foreground">Total Hours</p>
-                          <p className="text-lg font-bold tabular-nums">
-                            {labor.employeeSummary.reduce((s, e) => s + e.hoursWorked, 0).toFixed(1)}h
-                          </p>
-                        </div>
-                      </div>
-                    </CardContent>
-                  </Card>
-                  <Card>
-                    <CardContent className="p-4">
-                      <div className="flex items-center gap-3">
-                        <div className="w-9 h-9 rounded-lg bg-primary/10 flex items-center justify-center">
-                          <DollarSign className="w-4.5 h-4.5 text-primary" />
-                        </div>
-                        <div>
-                          <p className="text-xs text-muted-foreground">Labor Cost</p>
-                          <p className="text-lg font-bold tabular-nums">
-                            {fmtCurrency(labor.laborVsRevenue.totalLaborCost)}
-                          </p>
-                        </div>
-                      </div>
-                    </CardContent>
-                  </Card>
-                  <Card>
-                    <CardContent className="p-4">
-                      <div className="flex items-center gap-3">
-                        <div className="w-9 h-9 rounded-lg bg-amber-500/10 flex items-center justify-center">
-                          <TrendingUp className="w-4.5 h-4.5 text-amber-500" />
-                        </div>
-                        <div>
-                          <p className="text-xs text-muted-foreground">Labor % of Revenue</p>
-                          <p className="text-lg font-bold tabular-nums">
-                            {fmtPercent(labor.laborVsRevenue.ratio)}
-                          </p>
-                        </div>
-                      </div>
-                    </CardContent>
-                  </Card>
+                <div className="grid grid-cols-4 gap-3">
+                  <KPICard
+                    label="Total Hours"
+                    value={`${labor.employeeSummary.reduce((s, e) => s + e.hoursWorked, 0).toFixed(1)}h`}
+                    icon={Clock}
+                    color="bg-blue-500/10 text-blue-500"
+                  />
+                  <KPICard
+                    label="Labor Cost"
+                    value={fmtCurrency(labor.laborVsRevenue.totalLaborCost)}
+                    icon={DollarSign}
+                    color="bg-primary/10 text-primary"
+                  />
+                  <KPICard
+                    label="Total Tips"
+                    value={fmtCurrency(labor.totalTips)}
+                    icon={Receipt}
+                    color="bg-green-500/10 text-green-500"
+                  />
+                  <KPICard
+                    label="Labor % of Revenue"
+                    value={fmtPercent(labor.laborVsRevenue.ratio)}
+                    icon={TrendingUp}
+                    color="bg-amber-500/10 text-amber-500"
+                  />
                 </div>
 
                 {/* Employee Summary Table */}
@@ -936,14 +998,14 @@ export default function Reports({ locationId }: { locationId: number }) {
                           <TableHead className="text-right">Hours</TableHead>
                           <TableHead className="text-right">Break (min)</TableHead>
                           <TableHead className="text-right">Labor Cost</TableHead>
-                          <TableHead></TableHead>
+                          <TableHead className="text-right">Tips</TableHead>
                         </TableRow>
                       </TableHeader>
                       <TableBody>
                         {labor.employeeSummary.length === 0 ? (
                           <TableRow>
                             <TableCell colSpan={7} className="text-center text-muted-foreground py-8">
-                              No shifts recorded
+                              No shifts found
                             </TableCell>
                           </TableRow>
                         ) : (
@@ -959,13 +1021,7 @@ export default function Reports({ locationId }: { locationId: number }) {
                                 <TableCell className="text-right tabular-nums">{emp.hoursWorked.toFixed(1)}</TableCell>
                                 <TableCell className="text-right tabular-nums">{emp.breakMinutes}</TableCell>
                                 <TableCell className="text-right tabular-nums font-medium">{fmtCurrency(emp.laborCost)}</TableCell>
-                                <TableCell>
-                                  {hasOT && (
-                                    <Badge variant="destructive" className="text-[10px]">
-                                      <AlertTriangle className="w-3 h-3 mr-1" />OT
-                                    </Badge>
-                                  )}
-                                </TableCell>
+                                <TableCell className="text-right tabular-nums text-green-600">{fmtCurrency(emp.tips)}</TableCell>
                               </TableRow>
                             );
                           })
@@ -1205,6 +1261,280 @@ export default function Reports({ locationId }: { locationId: number }) {
                     </Table>
                   </CardContent>
                 </Card>
+              </>
+            )}
+          </TabsContent>
+
+          {/* =================== ENTERPRISE TAB =================== */}
+          <TabsContent value="enterprise" className="p-4 space-y-4 mt-0">
+            {enterpriseLoading ? (
+              <LoadingState />
+            ) : !enterprise ? (
+              <EmptyState message="No enterprise data available for this period" />
+            ) : (
+              <>
+                {/* KPI Cards */}
+                <div className="grid grid-cols-6 gap-3">
+                  <KPICard
+                    label="Total Revenue"
+                    value={fmtCurrency(enterprise.overview.totalRevenue)}
+                    icon={DollarSign}
+                    color="bg-primary/10 text-primary"
+                  />
+                  <KPICard
+                    label="Total Orders"
+                    value={String(enterprise.overview.totalOrders)}
+                    icon={ShoppingBag}
+                    color="bg-blue-500/10 text-blue-500"
+                  />
+                  <KPICard
+                    label="Avg Order"
+                    value={fmtCurrency(enterprise.overview.avgOrderValue)}
+                    icon={TrendingUp}
+                    color="bg-green-500/10 text-green-500"
+                  />
+                  <KPICard
+                    label="Total Tips"
+                    value={fmtCurrency(enterprise.overview.totalTips)}
+                    icon={Receipt}
+                    color="bg-amber-500/10 text-amber-500"
+                  />
+                  <KPICard
+                    label="Labor Cost"
+                    value={fmtCurrency(enterprise.overview.totalLaborCost)}
+                    icon={Clock}
+                    color="bg-purple-500/10 text-purple-500"
+                  />
+                  <KPICard
+                    label="Labor %"
+                    value={fmtPercent(enterprise.overview.laborRatio)}
+                    icon={TrendingUp}
+                    color="bg-red-500/10 text-red-500"
+                  />
+                </div>
+
+                {/* Location Comparison Table */}
+                <Card>
+                  <CardHeader className="p-4 pb-2">
+                    <CardTitle className="text-sm font-semibold">Location Performance Comparison</CardTitle>
+                  </CardHeader>
+                  <CardContent className="p-0">
+                    <Table>
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead>Location</TableHead>
+                          <TableHead className="text-right">Orders</TableHead>
+                          <TableHead className="text-right">Revenue</TableHead>
+                          <TableHead className="text-right">Avg Order</TableHead>
+                          <TableHead className="text-right">Tips</TableHead>
+                          <TableHead className="text-right">Labor Cost</TableHead>
+                          <TableHead className="text-right">Labor %</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {enterprise.locationBreakdown.map((loc, idx) => (
+                          <TableRow key={loc.locationId}>
+                            <TableCell className="font-medium">
+                              <div className="flex items-center gap-2">
+                                <div className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: LOCATION_COLORS[idx % LOCATION_COLORS.length] }} />
+                                {loc.locationName}
+                              </div>
+                            </TableCell>
+                            <TableCell className="text-right tabular-nums">{loc.orders}</TableCell>
+                            <TableCell className="text-right tabular-nums font-medium">{fmtCurrency(loc.revenue)}</TableCell>
+                            <TableCell className="text-right tabular-nums">{fmtCurrency(loc.avgOrderValue)}</TableCell>
+                            <TableCell className="text-right tabular-nums">{fmtCurrency(loc.tips)}</TableCell>
+                            <TableCell className="text-right tabular-nums">{fmtCurrency(loc.laborCost)}</TableCell>
+                            <TableCell className="text-right tabular-nums">
+                              <Badge variant={loc.laborRatio > 30 ? "destructive" : "outline"} className="text-[10px]">
+                                {fmtPercent(loc.laborRatio)}
+                              </Badge>
+                            </TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                      <TableFooter>
+                        <TableRow>
+                          <TableCell className="font-bold">Total</TableCell>
+                          <TableCell className="text-right tabular-nums font-bold">{enterprise.overview.totalOrders}</TableCell>
+                          <TableCell className="text-right tabular-nums font-bold">{fmtCurrency(enterprise.overview.totalRevenue)}</TableCell>
+                          <TableCell className="text-right tabular-nums font-bold">{fmtCurrency(enterprise.overview.avgOrderValue)}</TableCell>
+                          <TableCell className="text-right tabular-nums font-bold">{fmtCurrency(enterprise.overview.totalTips)}</TableCell>
+                          <TableCell className="text-right tabular-nums font-bold">{fmtCurrency(enterprise.overview.totalLaborCost)}</TableCell>
+                          <TableCell className="text-right tabular-nums font-bold">
+                            <Badge variant={enterprise.overview.laborRatio > 30 ? "destructive" : "outline"} className="text-[10px]">
+                              {fmtPercent(enterprise.overview.laborRatio)}
+                            </Badge>
+                          </TableCell>
+                        </TableRow>
+                      </TableFooter>
+                    </Table>
+                  </CardContent>
+                </Card>
+
+                {/* Revenue Trend by Location (stacked bar chart) */}
+                <Card>
+                  <CardHeader className="p-4 pb-2">
+                    <CardTitle className="text-sm font-semibold">Daily Revenue by Location</CardTitle>
+                  </CardHeader>
+                  <CardContent className="p-4 pt-0">
+                    <div className="h-[280px]">
+                      {enterprise.dailyTrend.length > 0 ? (
+                        <ResponsiveContainer width="100%" height="100%">
+                          <BarChart data={enterprise.dailyTrend}>
+                            <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
+                            <XAxis
+                              dataKey="date"
+                              tickFormatter={(d) => format(new Date(d + "T00:00:00"), "MMM d")}
+                              tick={{ fontSize: 11 }}
+                              stroke="hsl(var(--muted-foreground))"
+                            />
+                            <YAxis
+                              tick={{ fontSize: 11 }}
+                              stroke="hsl(var(--muted-foreground))"
+                              tickFormatter={(v) => `$${v}`}
+                            />
+                            <Tooltip
+                              labelFormatter={(d) => format(new Date(d + "T00:00:00"), "MMM d, yyyy")}
+                              formatter={(value: number) => [`$${value.toFixed(2)}`, undefined]}
+                              contentStyle={TOOLTIP_STYLE}
+                            />
+                            <Legend iconSize={8} wrapperStyle={{ fontSize: "11px" }} />
+                            {locationNames.map((name, idx) => (
+                              <Bar
+                                key={name}
+                                dataKey={name}
+                                stackId="revenue"
+                                fill={LOCATION_COLORS[idx % LOCATION_COLORS.length]}
+                                radius={idx === locationNames.length - 1 ? [4, 4, 0, 0] : [0, 0, 0, 0]}
+                              />
+                            ))}
+                          </BarChart>
+                        </ResponsiveContainer>
+                      ) : (
+                        <EmptyState message="No daily data available" />
+                      )}
+                    </div>
+                  </CardContent>
+                </Card>
+
+                {/* Bottom row: payment, source, top items */}
+                <div className="grid grid-cols-3 gap-3">
+                  <Card>
+                    <CardHeader className="p-4 pb-2">
+                      <CardTitle className="text-sm font-semibold">By Payment Method</CardTitle>
+                    </CardHeader>
+                    <CardContent className="p-0">
+                      <Table>
+                        <TableHeader>
+                          <TableRow>
+                            <TableHead>Method</TableHead>
+                            <TableHead className="text-right">Count</TableHead>
+                            <TableHead className="text-right">Total</TableHead>
+                          </TableRow>
+                        </TableHeader>
+                        <TableBody>
+                          {enterprise.paymentBreakdown.map((p) => (
+                            <TableRow key={p.method}>
+                              <TableCell className="text-sm capitalize">{p.method}</TableCell>
+                              <TableCell className="text-right tabular-nums">{p.count}</TableCell>
+                              <TableCell className="text-right tabular-nums font-medium">{fmtCurrency(p.total)}</TableCell>
+                            </TableRow>
+                          ))}
+                        </TableBody>
+                      </Table>
+                    </CardContent>
+                  </Card>
+
+                  <Card>
+                    <CardHeader className="p-4 pb-2">
+                      <CardTitle className="text-sm font-semibold">By Source</CardTitle>
+                    </CardHeader>
+                    <CardContent className="p-0">
+                      <Table>
+                        <TableHeader>
+                          <TableRow>
+                            <TableHead>Source</TableHead>
+                            <TableHead className="text-right">Count</TableHead>
+                            <TableHead className="text-right">Total</TableHead>
+                          </TableRow>
+                        </TableHeader>
+                        <TableBody>
+                          {enterprise.sourceBreakdown.map((s) => (
+                            <TableRow key={s.source}>
+                              <TableCell className="text-sm capitalize">{s.source}</TableCell>
+                              <TableCell className="text-right tabular-nums">{s.count}</TableCell>
+                              <TableCell className="text-right tabular-nums font-medium">{fmtCurrency(s.total)}</TableCell>
+                            </TableRow>
+                          ))}
+                        </TableBody>
+                      </Table>
+                    </CardContent>
+                  </Card>
+
+                  <Card>
+                    <CardHeader className="p-4 pb-2">
+                      <CardTitle className="text-sm font-semibold">Top Items (All Locations)</CardTitle>
+                    </CardHeader>
+                    <CardContent className="p-0">
+                      <Table>
+                        <TableHeader>
+                          <TableRow>
+                            <TableHead>Item</TableHead>
+                            <TableHead className="text-right">Qty</TableHead>
+                            <TableHead className="text-right">Revenue</TableHead>
+                          </TableRow>
+                        </TableHeader>
+                        <TableBody>
+                          {enterprise.topItems.map((item) => (
+                            <TableRow key={item.name}>
+                              <TableCell className="text-sm">{item.name}</TableCell>
+                              <TableCell className="text-right tabular-nums">{item.quantity}</TableCell>
+                              <TableCell className="text-right tabular-nums font-medium">{fmtCurrency(item.revenue)}</TableCell>
+                            </TableRow>
+                          ))}
+                        </TableBody>
+                      </Table>
+                    </CardContent>
+                  </Card>
+                </div>
+
+                {/* Items Sold by Day (Enterprise) */}
+                {enterprise.itemsSoldByDay.length > 0 && (
+                  <Card>
+                    <CardHeader className="p-4 pb-2">
+                      <CardTitle className="text-sm font-semibold">Items Sold by Day (All Locations)</CardTitle>
+                    </CardHeader>
+                    <CardContent className="p-0">
+                      <Table>
+                        <TableHeader>
+                          <TableRow>
+                            <TableHead>Date</TableHead>
+                            <TableHead>Item</TableHead>
+                            <TableHead className="text-right">Qty</TableHead>
+                            <TableHead className="text-right">Revenue</TableHead>
+                          </TableRow>
+                        </TableHeader>
+                        <TableBody>
+                          {enterprise.itemsSoldByDay.map((day) =>
+                            day.items.map((item, idx) => (
+                              <TableRow key={`${day.date}-${item.name}`}>
+                                {idx === 0 ? (
+                                  <TableCell rowSpan={day.items.length} className="text-sm font-medium align-top border-r">
+                                    {format(new Date(day.date + "T00:00:00"), "MMM d, yyyy")}
+                                  </TableCell>
+                                ) : null}
+                                <TableCell className="text-sm">{item.name}</TableCell>
+                                <TableCell className="text-right tabular-nums">{item.quantity}</TableCell>
+                                <TableCell className="text-right tabular-nums">{fmtCurrency(item.revenue)}</TableCell>
+                              </TableRow>
+                            ))
+                          )}
+                        </TableBody>
+                      </Table>
+                    </CardContent>
+                  </Card>
+                )}
               </>
             )}
           </TabsContent>

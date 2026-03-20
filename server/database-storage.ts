@@ -5,8 +5,9 @@ import {
   modifierGroups, modifiers, orders, orderItems,
   promotions, users, customers, rewardConfig,
   giftCards, customerTransactions, shifts, settlements,
-  cashDrawerTransactions,
+  cashDrawerTransactions, auditLogs, tipPoolConfig,
 } from "@shared/schema";
+import type { EnterpriseReport } from "./storage";
 import type {
   Location, InsertLocation,
   Printer, InsertPrinter,
@@ -25,6 +26,8 @@ import type {
   Shift, InsertShift,
   Settlement, InsertSettlement,
   CashDrawerTransaction, InsertCashDrawerTransaction,
+  AuditLog, InsertAuditLog,
+  TipPoolConfig, InsertTipPoolConfig,
 } from "@shared/schema";
 import type { IStorage, DashboardReport, SalesReport, ProductMixReport, LaborReport, CustomerReport } from "./storage";
 
@@ -203,6 +206,11 @@ export class DatabaseStorage implements IStorage {
       updateData.completedAt = new Date();
     }
     const [order] = await db.update(orders).set(updateData).where(eq(orders.id, id)).returning();
+    return order;
+  }
+
+  async updateOrder(id: number, data: Partial<any>): Promise<Order | undefined> {
+    const [order] = await db.update(orders).set({ ...data, updatedAt: new Date() }).where(eq(orders.id, id)).returning();
     return order;
   }
 
@@ -402,6 +410,11 @@ export class DatabaseStorage implements IStorage {
   async updateShift(id: number, data: Partial<InsertShift & { totalHours: number }>): Promise<Shift | undefined> {
     const [s] = await db.update(shifts).set(data).where(eq(shifts.id, id)).returning();
     return s;
+  }
+
+  async deleteShift(id: number): Promise<boolean> {
+    const result = await db.delete(shifts).where(eq(shifts.id, id)).returning();
+    return result.length > 0;
   }
 
   // ============ UTILITIES ============
@@ -675,6 +688,32 @@ export class DatabaseStorage implements IStorage {
     const totalTips = dailyBreakdown.reduce((s, d) => s + d.tips, 0);
     const totalTotal = dailyBreakdown.reduce((s, d) => s + d.total, 0);
 
+    // Items sold by day
+    const dailyItemRows = await db.select({
+      date: sql<string>`to_char(${orders.createdAt}, 'YYYY-MM-DD')`,
+      name: orderItems.name,
+      quantity: sql<number>`coalesce(sum(${orderItems.quantity}), 0)`,
+      revenue: sql<number>`coalesce(sum(${orderItems.unitPrice} * ${orderItems.quantity}), 0)`,
+    }).from(orderItems)
+      .innerJoin(orders, eq(orderItems.orderId, orders.id))
+      .where(dateFilter)
+      .groupBy(sql`to_char(${orders.createdAt}, 'YYYY-MM-DD')`, orderItems.name)
+      .orderBy(sql`to_char(${orders.createdAt}, 'YYYY-MM-DD')`, sql`coalesce(sum(${orderItems.quantity}), 0) desc`);
+
+    const dailyItemMap: Record<string, Array<{ name: string; quantity: number; revenue: number }>> = {};
+    for (const r of dailyItemRows) {
+      const date = String(r.date);
+      if (!dailyItemMap[date]) dailyItemMap[date] = [];
+      dailyItemMap[date].push({
+        name: r.name,
+        quantity: Number(r.quantity),
+        revenue: Math.round(Number(r.revenue) * 100) / 100,
+      });
+    }
+    const itemsSoldByDay = Object.entries(dailyItemMap)
+      .map(([date, items]) => ({ date, items }))
+      .sort((a, b) => a.date.localeCompare(b.date));
+
     return {
       dailyBreakdown,
       paymentBreakdown,
@@ -689,6 +728,7 @@ export class DatabaseStorage implements IStorage {
         tips: Math.round(totalTips * 100) / 100,
         total: Math.round(totalTotal * 100) / 100,
       },
+      itemsSoldByDay,
     };
   }
 
@@ -825,9 +865,10 @@ export class DatabaseStorage implements IStorage {
     // Labor vs revenue
     const totalLaborCost = employeeSummary.reduce((s, e) => s + e.laborCost, 0);
 
-    // Get revenue for same period
+    // Get revenue and tips for same period
     const [revRow] = await db.select({
       revenue: sql<number>`coalesce(sum(${orders.total}), 0)`,
+      tips: sql<number>`coalesce(sum(${orders.tip}), 0)`,
     }).from(orders).where(and(
       eq(orders.locationId, locationId),
       sql`${orders.createdAt} >= ${start}`,
@@ -835,7 +876,15 @@ export class DatabaseStorage implements IStorage {
       sql`${orders.status} != 'cancelled'`
     ));
     const totalRevenue = Math.round(Number(revRow?.revenue ?? 0) * 100) / 100;
+    const totalTips = Math.round(Number(revRow?.tips ?? 0) * 100) / 100;
     const ratio = totalRevenue > 0 ? Math.round((totalLaborCost / totalRevenue) * 10000) / 100 : 0;
+
+    // Distribute tips evenly across employees who worked
+    const totalEmployees = employeeSummary.length;
+    const tipsPerEmployee = totalEmployees > 0 ? Math.round((totalTips / totalEmployees) * 100) / 100 : 0;
+    for (const emp of employeeSummary) {
+      (emp as any).tips = tipsPerEmployee;
+    }
 
     // Overtime flags
     const overtimeFlags: LaborReport["overtimeFlags"] = [];
@@ -881,6 +930,7 @@ export class DatabaseStorage implements IStorage {
     return {
       employeeSummary,
       dailyLaborTrend,
+      totalTips,
       laborVsRevenue: { totalLaborCost: Math.round(totalLaborCost * 100) / 100, totalRevenue, ratio },
       overtimeFlags,
     };
@@ -971,5 +1021,213 @@ export class DatabaseStorage implements IStorage {
       tierDistribution,
       acquisitionTrend,
     };
+  }
+
+  async getReportEnterprise(startDate: string, endDate: string): Promise<EnterpriseReport> {
+    const { start, end } = this.getDateRange(startDate, endDate);
+    const dateFilter = and(
+      sql`${orders.createdAt} >= ${start}`,
+      sql`${orders.createdAt} <= ${end}`,
+      sql`${orders.status} != 'cancelled'`
+    );
+
+    // Get all locations
+    const allLocations = await db.select().from(locations);
+    const locMap = new Map(allLocations.map(l => [l.id, l.name]));
+
+    // Per-location revenue/orders
+    const locRows = await db.select({
+      locationId: orders.locationId,
+      revenue: sql<number>`coalesce(sum(${orders.total}), 0)`,
+      orders: sql<number>`count(*)`,
+      tips: sql<number>`coalesce(sum(${orders.tip}), 0)`,
+    }).from(orders).where(dateFilter).groupBy(orders.locationId);
+
+    // Per-location labor cost
+    const shiftRows = await db.select({
+      locationId: shifts.locationId,
+      userId: shifts.userId,
+      totalHours: shifts.totalHours,
+    }).from(shifts).where(and(
+      sql`${shifts.clockIn} >= ${start}`,
+      sql`${shifts.clockIn} <= ${end}`,
+    ));
+
+    const allUsers = await db.select().from(users);
+    const userMap = new Map(allUsers.map(u => [u.id, u]));
+
+    const laborByLoc: Record<number, number> = {};
+    for (const s of shiftRows) {
+      const rate = userMap.get(s.userId)?.hourlyRate || 0;
+      const hours = Number(s.totalHours ?? 0);
+      laborByLoc[s.locationId] = (laborByLoc[s.locationId] || 0) + hours * rate;
+    }
+
+    const locationBreakdown = locRows.map(r => {
+      const rev = Math.round(Number(r.revenue) * 100) / 100;
+      const ord = Number(r.orders);
+      const tips = Math.round(Number(r.tips) * 100) / 100;
+      const labor = Math.round((laborByLoc[r.locationId] || 0) * 100) / 100;
+      return {
+        locationId: r.locationId,
+        locationName: locMap.get(r.locationId) || "Unknown",
+        revenue: rev,
+        orders: ord,
+        avgOrderValue: ord > 0 ? Math.round((rev / ord) * 100) / 100 : 0,
+        tips,
+        laborCost: labor,
+        laborRatio: rev > 0 ? Math.round((labor / rev) * 10000) / 100 : 0,
+      };
+    }).sort((a, b) => b.revenue - a.revenue);
+
+    // Overview totals
+    const totalRevenue = locationBreakdown.reduce((s, l) => s + l.revenue, 0);
+    const totalOrders = locationBreakdown.reduce((s, l) => s + l.orders, 0);
+    const totalTips = locationBreakdown.reduce((s, l) => s + l.tips, 0);
+    const totalLaborCost = locationBreakdown.reduce((s, l) => s + l.laborCost, 0);
+
+    // Daily trend per location
+    const dailyLocRows = await db.select({
+      date: sql<string>`to_char(${orders.createdAt}, 'YYYY-MM-DD')`,
+      locationId: orders.locationId,
+      revenue: sql<number>`coalesce(sum(${orders.total}), 0)`,
+    }).from(orders).where(dateFilter)
+      .groupBy(sql`to_char(${orders.createdAt}, 'YYYY-MM-DD')`, orders.locationId)
+      .orderBy(sql`to_char(${orders.createdAt}, 'YYYY-MM-DD')`);
+
+    const dailyMap: Record<string, Record<string, number>> = {};
+    for (const r of dailyLocRows) {
+      const date = String(r.date);
+      if (!dailyMap[date]) dailyMap[date] = {};
+      const locName = locMap.get(r.locationId) || "Unknown";
+      dailyMap[date][locName] = Math.round(Number(r.revenue) * 100) / 100;
+    }
+    const dailyTrend = Object.entries(dailyMap)
+      .map(([date, locs]) => ({ date, ...locs }))
+      .sort((a, b) => a.date.localeCompare(b.date));
+
+    // Payment breakdown (all locations)
+    const payRows = await db.select({
+      method: orders.paymentMethod,
+      count: sql<number>`count(*)`,
+      total: sql<number>`coalesce(sum(${orders.total}), 0)`,
+    }).from(orders).where(dateFilter).groupBy(orders.paymentMethod);
+
+    const paymentBreakdown = payRows.map(r => ({
+      method: r.method || "unknown",
+      count: Number(r.count),
+      total: Math.round(Number(r.total) * 100) / 100,
+    }));
+
+    // Source breakdown (all locations)
+    const srcRows = await db.select({
+      source: orders.source,
+      count: sql<number>`count(*)`,
+      total: sql<number>`coalesce(sum(${orders.total}), 0)`,
+    }).from(orders).where(dateFilter).groupBy(orders.source);
+
+    const sourceBreakdown = srcRows.map(r => ({
+      source: r.source || "pos",
+      count: Number(r.count),
+      total: Math.round(Number(r.total) * 100) / 100,
+    }));
+
+    // Top items across all locations
+    const itemRows = await db.select({
+      name: orderItems.name,
+      quantity: sql<number>`coalesce(sum(${orderItems.quantity}), 0)`,
+      revenue: sql<number>`coalesce(sum(${orderItems.unitPrice} * ${orderItems.quantity}), 0)`,
+    }).from(orderItems)
+      .innerJoin(orders, eq(orderItems.orderId, orders.id))
+      .where(dateFilter)
+      .groupBy(orderItems.name)
+      .orderBy(sql`coalesce(sum(${orderItems.unitPrice} * ${orderItems.quantity}), 0) desc`)
+      .limit(15);
+
+    const topItems = itemRows.map(r => ({
+      name: r.name,
+      quantity: Number(r.quantity),
+      revenue: Math.round(Number(r.revenue) * 100) / 100,
+    }));
+
+    // Items sold by day
+    const dailyItemRows = await db.select({
+      date: sql<string>`to_char(${orders.createdAt}, 'YYYY-MM-DD')`,
+      name: orderItems.name,
+      quantity: sql<number>`coalesce(sum(${orderItems.quantity}), 0)`,
+      revenue: sql<number>`coalesce(sum(${orderItems.unitPrice} * ${orderItems.quantity}), 0)`,
+    }).from(orderItems)
+      .innerJoin(orders, eq(orderItems.orderId, orders.id))
+      .where(dateFilter)
+      .groupBy(sql`to_char(${orders.createdAt}, 'YYYY-MM-DD')`, orderItems.name)
+      .orderBy(sql`to_char(${orders.createdAt}, 'YYYY-MM-DD')`, sql`coalesce(sum(${orderItems.quantity}), 0) desc`);
+
+    const dailyItemMap: Record<string, Array<{ name: string; quantity: number; revenue: number }>> = {};
+    for (const r of dailyItemRows) {
+      const date = String(r.date);
+      if (!dailyItemMap[date]) dailyItemMap[date] = [];
+      dailyItemMap[date].push({
+        name: r.name,
+        quantity: Number(r.quantity),
+        revenue: Math.round(Number(r.revenue) * 100) / 100,
+      });
+    }
+    const itemsSoldByDay = Object.entries(dailyItemMap)
+      .map(([date, items]) => ({ date, items }))
+      .sort((a, b) => a.date.localeCompare(b.date));
+
+    return {
+      overview: {
+        totalRevenue: Math.round(totalRevenue * 100) / 100,
+        totalOrders,
+        avgOrderValue: totalOrders > 0 ? Math.round((totalRevenue / totalOrders) * 100) / 100 : 0,
+        totalTips: Math.round(totalTips * 100) / 100,
+        totalLaborCost: Math.round(totalLaborCost * 100) / 100,
+        laborRatio: totalRevenue > 0 ? Math.round((totalLaborCost / totalRevenue) * 10000) / 100 : 0,
+      },
+      locationBreakdown,
+      dailyTrend,
+      paymentBreakdown,
+      sourceBreakdown,
+      topItems,
+      itemsSoldByDay,
+    };
+  }
+
+  // ============ AUDIT LOG ============
+
+  async getAuditLogs(locationId?: number, action?: string, startDate?: string, endDate?: string): Promise<AuditLog[]> {
+    const conditions: any[] = [];
+    if (locationId) conditions.push(eq(auditLogs.locationId, locationId));
+    if (action) conditions.push(eq(auditLogs.action, action));
+    if (startDate) conditions.push(sql`${auditLogs.createdAt} >= ${startDate}::timestamp`);
+    if (endDate) conditions.push(sql`${auditLogs.createdAt} <= (${endDate}::date + interval '1 day')`);
+
+    const query = conditions.length > 0
+      ? db.select().from(auditLogs).where(and(...conditions)).orderBy(desc(auditLogs.createdAt)).limit(200)
+      : db.select().from(auditLogs).orderBy(desc(auditLogs.createdAt)).limit(200);
+    return query;
+  }
+
+  async createAuditLog(data: InsertAuditLog): Promise<AuditLog> {
+    const [log] = await db.insert(auditLogs).values(data).returning();
+    return log;
+  }
+
+  // ============ TIP POOL CONFIG ============
+
+  async getTipPoolConfig(locationId: number): Promise<TipPoolConfig | undefined> {
+    const [config] = await db.select().from(tipPoolConfig).where(eq(tipPoolConfig.locationId, locationId));
+    return config;
+  }
+
+  async createTipPoolConfig(data: InsertTipPoolConfig): Promise<TipPoolConfig> {
+    const [config] = await db.insert(tipPoolConfig).values(data).returning();
+    return config;
+  }
+
+  async updateTipPoolConfig(id: number, data: Partial<InsertTipPoolConfig>): Promise<TipPoolConfig | undefined> {
+    const [config] = await db.update(tipPoolConfig).set(data).where(eq(tipPoolConfig.id, id)).returning();
+    return config;
   }
 }

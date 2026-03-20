@@ -5,6 +5,8 @@ import { ManagerPinDialog } from "@/components/manager-pin-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
 import {
   Select,
   SelectContent,
@@ -40,6 +42,9 @@ import {
   Loader2,
   CreditCard,
   Banknote,
+  Search,
+  RotateCcw,
+  Receipt,
 } from "lucide-react";
 import type { Order, OrderItem } from "@shared/schema";
 
@@ -102,9 +107,24 @@ export default function Orders({ locationId }: { locationId: number }) {
   const { toast } = useToast();
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [sourceFilter, setSourceFilter] = useState<string>("all");
+  const [searchQuery, setSearchQuery] = useState("");
+  const [dateFilter, setDateFilter] = useState("");
+  const [paymentFilter, setPaymentFilter] = useState<string>("all");
   const [selectedOrder, setSelectedOrder] = useState<OrderDetail | null>(null);
   const [detailOpen, setDetailOpen] = useState(false);
   const [cancelTargetOrderId, setCancelTargetOrderId] = useState<number | null>(null);
+  // Refund
+  const [refundDialogOpen, setRefundDialogOpen] = useState(false);
+  const [refundAmount, setRefundAmount] = useState("");
+  const [refundReason, setRefundReason] = useState("");
+  const [refundManagerAuth, setRefundManagerAuth] = useState(false);
+  const [refundAuthorizer, setRefundAuthorizer] = useState("");
+  // Receipt
+  const [receiptDialogOpen, setReceiptDialogOpen] = useState(false);
+  const [receiptData, setReceiptData] = useState<any>(null);
+  // Digital receipt
+  const [sendReceiptEmail, setSendReceiptEmail] = useState("");
+  const [sendingReceipt, setSendingReceipt] = useState(false);
 
   const { data: orders = [], isLoading } = useQuery<Order[]>({
     queryKey: ["/api/orders", { locationId }],
@@ -135,9 +155,38 @@ export default function Orders({ locationId }: { locationId: number }) {
     },
   });
 
+  const refundMutation = useMutation({
+    mutationFn: async ({ orderId, amount, reason, refundedBy }: { orderId: number; amount: number; reason: string; refundedBy: string }) => {
+      const res = await apiRequest("POST", `/api/orders/${orderId}/refund`, { amount, reason, refundedBy });
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/orders"] });
+      setRefundDialogOpen(false);
+      setRefundAmount("");
+      setRefundReason("");
+      toast({ title: "Refund Processed", description: `Refund of $${refundAmount} issued successfully` });
+    },
+    onError: (err: Error) => {
+      toast({ title: "Refund Failed", description: err.message, variant: "destructive" });
+    },
+  });
+
   const filteredOrders = orders.filter((o) => {
     if (statusFilter !== "all" && o.status !== statusFilter) return false;
     if (sourceFilter !== "all" && o.source !== sourceFilter) return false;
+    if (paymentFilter !== "all" && o.paymentMethod !== paymentFilter) return false;
+    if (dateFilter) {
+      const orderDate = o.createdAt ? new Date(o.createdAt).toISOString().split("T")[0] : "";
+      if (orderDate !== dateFilter) return false;
+    }
+    if (searchQuery.trim()) {
+      const q = searchQuery.toLowerCase();
+      if (
+        !o.orderNumber.toLowerCase().includes(q) &&
+        !(o.customerName || "").toLowerCase().includes(q)
+      ) return false;
+    }
     return true;
   });
 
@@ -183,8 +232,23 @@ export default function Orders({ locationId }: { locationId: number }) {
       <div className="flex items-center justify-between mb-4">
         <h1 className="text-xl font-bold">Orders</h1>
         <div className="flex items-center gap-2">
+          <div className="relative">
+            <Search className="absolute left-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground" />
+            <Input
+              placeholder="Search order # or customer..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="h-8 text-sm pl-7 w-[200px]"
+            />
+          </div>
+          <Input
+            type="date"
+            value={dateFilter}
+            onChange={(e) => setDateFilter(e.target.value)}
+            className="h-8 text-sm w-[140px]"
+          />
           <Select value={statusFilter} onValueChange={setStatusFilter}>
-            <SelectTrigger className="w-[140px] h-8 text-sm" data-testid="filter-status">
+            <SelectTrigger className="w-[130px] h-8 text-sm" data-testid="filter-status">
               <SelectValue placeholder="Status" />
             </SelectTrigger>
             <SelectContent>
@@ -195,7 +259,7 @@ export default function Orders({ locationId }: { locationId: number }) {
             </SelectContent>
           </Select>
           <Select value={sourceFilter} onValueChange={setSourceFilter}>
-            <SelectTrigger className="w-[130px] h-8 text-sm" data-testid="filter-source">
+            <SelectTrigger className="w-[120px] h-8 text-sm" data-testid="filter-source">
               <SelectValue placeholder="Source" />
             </SelectTrigger>
             <SelectContent>
@@ -204,6 +268,18 @@ export default function Orders({ locationId }: { locationId: number }) {
               <SelectItem value="ubereats">UberEats</SelectItem>
               <SelectItem value="doordash">DoorDash</SelectItem>
               <SelectItem value="app">App</SelectItem>
+            </SelectContent>
+          </Select>
+          <Select value={paymentFilter} onValueChange={setPaymentFilter}>
+            <SelectTrigger className="w-[120px] h-8 text-sm">
+              <SelectValue placeholder="Payment" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All Payments</SelectItem>
+              <SelectItem value="stripe">Card</SelectItem>
+              <SelectItem value="cash">Cash</SelectItem>
+              <SelectItem value="gift_card">Gift Card</SelectItem>
+              <SelectItem value="unpaid">Unpaid</SelectItem>
             </SelectContent>
           </Select>
         </div>
@@ -432,6 +508,41 @@ export default function Orders({ locationId }: { locationId: number }) {
                   </Button>
                 </div>
               )}
+
+              {/* Refund & Receipt for closed/completed orders */}
+              {(selectedOrder.status === "closed" || selectedOrder.status === "completed") && (
+                <div className="flex gap-2 pt-2 border-t">
+                  <Button
+                    variant="outline"
+                    className="flex-1 gap-1.5 text-orange-700 border-orange-300 hover:bg-orange-50"
+                    onClick={() => {
+                      setRefundAmount(String(selectedOrder.total));
+                      setRefundReason("");
+                      setRefundManagerAuth(true);
+                    }}
+                  >
+                    <RotateCcw className="w-4 h-4" />
+                    Refund
+                  </Button>
+                  <Button
+                    variant="outline"
+                    className="flex-1 gap-1.5"
+                    onClick={async () => {
+                      try {
+                        const res = await apiRequest("GET", `/api/orders/${selectedOrder.id}/receipt`);
+                        const data = await res.json();
+                        setReceiptData(data);
+                        setReceiptDialogOpen(true);
+                      } catch {
+                        toast({ title: "Error", description: "Failed to load receipt", variant: "destructive" });
+                      }
+                    }}
+                  >
+                    <Receipt className="w-4 h-4" />
+                    Receipt
+                  </Button>
+                </div>
+              )}
             </div>
           )}
         </DialogContent>
@@ -453,6 +564,193 @@ export default function Orders({ locationId }: { locationId: number }) {
           setCancelTargetOrderId(null);
         }}
       />
+
+      {/* Manager PIN for Refund */}
+      <ManagerPinDialog
+        open={refundManagerAuth}
+        onOpenChange={(open) => { if (!open) setRefundManagerAuth(false); }}
+        actionDescription={`Refund $${refundAmount} on order #${selectedOrder?.orderNumber ?? ""}`}
+        onAuthorized={(user) => {
+          setRefundManagerAuth(false);
+          setRefundAuthorizer(user.name);
+          setRefundDialogOpen(true);
+        }}
+      />
+
+      {/* Refund Dialog */}
+      <Dialog open={refundDialogOpen} onOpenChange={setRefundDialogOpen}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <RotateCcw className="w-5 h-5 text-orange-600" />
+              Issue Refund — {selectedOrder?.orderNumber}
+            </DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div className="text-sm">
+              Order total: <span className="font-semibold">${selectedOrder?.total.toFixed(2)}</span>
+            </div>
+            <div className="space-y-1">
+              <Label>Refund Amount</Label>
+              <Input
+                type="number"
+                step="0.01"
+                min="0.01"
+                max={selectedOrder?.total}
+                value={refundAmount}
+                onChange={(e) => setRefundAmount(e.target.value)}
+              />
+            </div>
+            <div className="space-y-1">
+              <Label>Reason</Label>
+              <Textarea
+                value={refundReason}
+                onChange={(e) => setRefundReason(e.target.value)}
+                placeholder="Customer complaint, wrong order, etc."
+                rows={2}
+              />
+            </div>
+            <div className="flex justify-end gap-2 pt-2">
+              <Button variant="outline" onClick={() => setRefundDialogOpen(false)}>Cancel</Button>
+              <Button
+                className="bg-orange-600 hover:bg-orange-700"
+                onClick={() => {
+                  if (selectedOrder) {
+                    refundMutation.mutate({
+                      orderId: selectedOrder.id,
+                      amount: parseFloat(refundAmount),
+                      reason: refundReason,
+                      refundedBy: refundAuthorizer,
+                    });
+                  }
+                }}
+                disabled={!refundAmount || parseFloat(refundAmount) <= 0 || refundMutation.isPending}
+              >
+                {refundMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : null}
+                Refund ${parseFloat(refundAmount || "0").toFixed(2)}
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Receipt Dialog */}
+      <Dialog open={receiptDialogOpen} onOpenChange={setReceiptDialogOpen}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle>Receipt</DialogTitle>
+          </DialogHeader>
+          {receiptData && (
+            <div className="font-mono text-xs space-y-2 p-4 bg-white text-black rounded border">
+              <div className="text-center space-y-0.5">
+                <div className="font-bold text-sm">{receiptData.storeName}</div>
+                {receiptData.storeAddress && <div>{receiptData.storeAddress}</div>}
+                {receiptData.storePhone && <div>{receiptData.storePhone}</div>}
+              </div>
+              <div className="border-t border-dashed border-gray-400 my-2" />
+              <div className="flex justify-between">
+                <span>Order: {receiptData.orderNumber}</span>
+                <span>{receiptData.type}</span>
+              </div>
+              <div>{receiptData.date}</div>
+              {receiptData.customerName && <div>Customer: {receiptData.customerName}</div>}
+              <div className="border-t border-dashed border-gray-400 my-2" />
+              {receiptData.items.map((item: any, i: number) => (
+                <div key={i}>
+                  <div className="flex justify-between">
+                    <span>{item.quantity}x {item.name}</span>
+                    <span>${item.total.toFixed(2)}</span>
+                  </div>
+                  {item.modifiers?.length > 0 && (
+                    <div className="pl-3 text-[10px] text-gray-500">
+                      {item.modifiers.map((m: any) => m.name).join(", ")}
+                    </div>
+                  )}
+                </div>
+              ))}
+              <div className="border-t border-dashed border-gray-400 my-2" />
+              {receiptData.discountAmount > 0 && (
+                <div className="flex justify-between text-green-700">
+                  <span>Discount</span>
+                  <span>-${receiptData.discountAmount.toFixed(2)}</span>
+                </div>
+              )}
+              <div className="flex justify-between">
+                <span>Subtotal</span>
+                <span>${receiptData.subtotal.toFixed(2)}</span>
+              </div>
+              <div className="flex justify-between">
+                <span>Tax</span>
+                <span>${receiptData.tax.toFixed(2)}</span>
+              </div>
+              {receiptData.tip > 0 && (
+                <div className="flex justify-between">
+                  <span>Tip</span>
+                  <span>${receiptData.tip.toFixed(2)}</span>
+                </div>
+              )}
+              <div className="flex justify-between font-bold text-sm border-t border-dashed border-gray-400 pt-1">
+                <span>TOTAL</span>
+                <span>${receiptData.total.toFixed(2)}</span>
+              </div>
+              {receiptData.refundAmount > 0 && (
+                <div className="flex justify-between text-red-600 font-bold">
+                  <span>REFUND</span>
+                  <span>-${receiptData.refundAmount.toFixed(2)}</span>
+                </div>
+              )}
+              <div className="flex justify-between">
+                <span>Payment</span>
+                <span>{paymentLabels[receiptData.paymentMethod || ""] || receiptData.paymentMethod}</span>
+              </div>
+              <div className="border-t border-dashed border-gray-400 my-2" />
+              <div className="text-center text-[10px]">
+                {receiptData.header}
+              </div>
+              <div className="text-center text-[10px]">
+                {receiptData.footer}
+              </div>
+            </div>
+          )}
+          {/* Send digital receipt */}
+          <div className="flex gap-2 items-end">
+            <div className="flex-1">
+              <Label className="text-xs">Email receipt to:</Label>
+              <Input
+                type="email"
+                placeholder="customer@email.com"
+                value={sendReceiptEmail}
+                onChange={(e) => setSendReceiptEmail(e.target.value)}
+                className="h-8 text-sm"
+              />
+            </div>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={!sendReceiptEmail || sendingReceipt}
+              onClick={async () => {
+                if (!selectedOrder) return;
+                setSendingReceipt(true);
+                try {
+                  await apiRequest("POST", `/api/orders/${selectedOrder.id}/send-receipt`, { email: sendReceiptEmail });
+                  toast({ title: "Receipt Sent", description: `Emailed to ${sendReceiptEmail}` });
+                  setSendReceiptEmail("");
+                } catch {
+                  toast({ title: "Failed", description: "Could not send receipt", variant: "destructive" });
+                } finally {
+                  setSendingReceipt(false);
+                }
+              }}
+            >
+              {sendingReceipt ? <Loader2 className="w-3 h-3 animate-spin" /> : "Send"}
+            </Button>
+          </div>
+          <div className="flex justify-end gap-2">
+            <Button variant="outline" onClick={() => setReceiptDialogOpen(false)}>Close</Button>
+            <Button onClick={() => window.print()}>Print</Button>
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

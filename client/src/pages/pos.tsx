@@ -37,7 +37,10 @@ import {
   CloudUpload,
   Clock,
   Send,
+  Tag,
+  Split,
 } from "lucide-react";
+import { Label } from "@/components/ui/label";
 import type { MenuItem, MenuCategory, Customer, GiftCard } from "@shared/schema";
 
 interface CartItem {
@@ -73,6 +76,15 @@ export default function POS({ locationId }: { locationId: number }) {
   const [giftCardCode, setGiftCardCode] = useState("");
   const [giftCardLookingUp, setGiftCardLookingUp] = useState(false);
   const [foundGiftCard, setFoundGiftCard] = useState<GiftCard | null>(null);
+  // Discount
+  const [discountDialogOpen, setDiscountDialogOpen] = useState(false);
+  const [discountType, setDiscountType] = useState<"percentage" | "fixed">("percentage");
+  const [discountValue, setDiscountValue] = useState("");
+  // Split payment
+  const [splitDialogOpen, setSplitDialogOpen] = useState(false);
+  const [splitCashAmount, setSplitCashAmount] = useState("");
+  // Customer email for digital receipt
+  const [customerEmail, setCustomerEmail] = useState("");
 
   // Offline mode
   const {
@@ -193,9 +205,15 @@ export default function POS({ locationId }: { locationId: number }) {
         c.quantity,
     0
   );
-  const tax = Math.round(subtotal * 0.08 * 100) / 100;
-  const tip = Math.round(subtotal * (tipPercent / 100) * 100) / 100;
-  const total = Math.round((subtotal + tax + tip) * 100) / 100;
+  const discountAmount = discountValue
+    ? discountType === "percentage"
+      ? Math.round(subtotal * (parseFloat(discountValue) / 100) * 100) / 100
+      : Math.min(parseFloat(discountValue) || 0, subtotal)
+    : 0;
+  const discountedSubtotal = Math.round((subtotal - discountAmount) * 100) / 100;
+  const tax = Math.round(discountedSubtotal * 0.08 * 100) / 100;
+  const tip = Math.round(discountedSubtotal * (tipPercent / 100) * 100) / 100;
+  const total = Math.round((discountedSubtotal + tax + tip) * 100) / 100;
 
   const createOrderMutation = useMutation({
     mutationFn: async (paymentMethod: string) => {
@@ -227,14 +245,29 @@ export default function POS({ locationId }: { locationId: number }) {
           // silently fail — order was still placed
         }
       }
+      // Log discount to audit
+      if (discountAmount > 0) {
+        try {
+          await apiRequest("POST", "/api/audit-logs", {
+            locationId,
+            action: "discount_applied",
+            targetType: "order",
+            targetId: order.id,
+            details: `Discount ${discountType === "percentage" ? discountValue + "%" : "$" + discountValue} ($${discountAmount.toFixed(2)}) applied to ${order.orderNumber}`,
+            metadata: { discountType, discountValue, discountAmount },
+          });
+        } catch { /* ignore */ }
+      }
       toast({
         title: "Order Created",
-        description: `Order ${order.orderNumber} — $${order.total.toFixed(2)}${loyaltyCustomer ? " (points earned)" : ""}`,
+        description: `Order ${order.orderNumber} — $${order.total.toFixed(2)}${discountAmount > 0 ? ` (discount -$${discountAmount.toFixed(2)})` : ""}${loyaltyCustomer ? " (points earned)" : ""}`,
       });
       setCart([]);
       setCustomerName("");
+      setCustomerEmail("");
       setOrderNotes("");
       setTipPercent(0);
+      setDiscountValue("");
       setLoyaltyCustomer(null);
       queryClient.invalidateQueries({ queryKey: ["/api/orders"] });
     },
@@ -387,6 +420,38 @@ export default function POS({ locationId }: { locationId: number }) {
       return;
     }
     createOrderMutation.mutate("cash");
+  };
+
+  const handleSplitPayment = async () => {
+    if (cart.length === 0 || !splitCashAmount) return;
+    const cashPortion = parseFloat(splitCashAmount);
+    const cardPortion = Math.round((total - cashPortion) * 100) / 100;
+    if (cashPortion <= 0 || cardPortion <= 0) {
+      toast({ title: "Invalid Split", description: "Both portions must be positive", variant: "destructive" });
+      return;
+    }
+    try {
+      // Process card portion
+      const piRes = await apiRequest("POST", "/api/stripe/payment-intent", {
+        amount: Math.round(cardPortion * 100),
+      });
+      const pi = await piRes.json();
+      await apiRequest("POST", "/api/stripe/capture", { paymentIntentId: pi.id });
+      // Create order as split
+      createOrderMutation.mutate("split");
+      // Log split payment
+      await apiRequest("POST", "/api/audit-logs", {
+        locationId,
+        action: "split_payment",
+        targetType: "order",
+        details: `Split payment: $${cashPortion.toFixed(2)} cash + $${cardPortion.toFixed(2)} card`,
+        metadata: { cashAmount: cashPortion, cardAmount: cardPortion },
+      }).catch(() => {});
+      setSplitDialogOpen(false);
+      setSplitCashAmount("");
+    } catch (err: any) {
+      toast({ title: "Payment Error", description: err.message, variant: "destructive" });
+    }
   };
 
   const handleSendOrder = () => {
@@ -798,12 +863,39 @@ export default function POS({ locationId }: { locationId: number }) {
             ))}
           </div>
 
+          {/* Discount button */}
+          <div className="flex items-center gap-1.5">
+            <button
+              onClick={() => setDiscountDialogOpen(true)}
+              className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
+            >
+              <Tag className="w-3 h-3" />
+              {discountAmount > 0
+                ? `Discount: -$${discountAmount.toFixed(2)} (${discountType === "percentage" ? discountValue + "%" : "$" + discountValue})`
+                : "Add Discount"}
+            </button>
+            {discountAmount > 0 && (
+              <button
+                onClick={() => setDiscountValue("")}
+                className="text-xs text-red-500 hover:text-red-700"
+              >
+                <X className="w-3 h-3" />
+              </button>
+            )}
+          </div>
+
           {/* Totals */}
           <div className="space-y-0.5 text-sm">
             <div className="flex justify-between">
               <span className="text-muted-foreground">Subtotal</span>
               <span>${subtotal.toFixed(2)}</span>
             </div>
+            {discountAmount > 0 && (
+              <div className="flex justify-between text-green-600">
+                <span>Discount</span>
+                <span>-${discountAmount.toFixed(2)}</span>
+              </div>
+            )}
             <div className="flex justify-between">
               <span className="text-muted-foreground">Tax (8%)</span>
               <span>${tax.toFixed(2)}</span>
@@ -871,6 +963,20 @@ export default function POS({ locationId }: { locationId: number }) {
               {!isOnline && <Clock className="w-3 h-3 ml-1 opacity-60" />}
             </Button>
           </div>
+          {/* Split Payment */}
+          <Button
+            variant="outline"
+            className="w-full h-9 gap-2 text-sm"
+            onClick={() => {
+              setSplitCashAmount("");
+              setSplitDialogOpen(true);
+            }}
+            disabled={cart.length === 0 || createOrderMutation.isPending}
+          >
+            <Split className="w-4 h-4" />
+            Split Payment
+          </Button>
+
           <button
             onClick={openCashDrawer}
             className="w-full flex items-center justify-center gap-1.5 py-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors"
@@ -987,6 +1093,108 @@ export default function POS({ locationId }: { locationId: number }) {
                   Queue ${total.toFixed(2)}
                 </Button>
               )}
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+      {/* Discount Dialog */}
+      <Dialog open={discountDialogOpen} onOpenChange={setDiscountDialogOpen}>
+        <DialogContent className="max-w-xs">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Tag className="w-5 h-5" />
+              Apply Discount
+            </DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div className="flex gap-2">
+              <button
+                onClick={() => setDiscountType("percentage")}
+                className={`flex-1 py-2 text-sm font-medium rounded ${discountType === "percentage" ? "bg-primary text-primary-foreground" : "bg-secondary"}`}
+              >
+                Percentage %
+              </button>
+              <button
+                onClick={() => setDiscountType("fixed")}
+                className={`flex-1 py-2 text-sm font-medium rounded ${discountType === "fixed" ? "bg-primary text-primary-foreground" : "bg-secondary"}`}
+              >
+                Fixed $
+              </button>
+            </div>
+            <div>
+              <Label>{discountType === "percentage" ? "Discount %" : "Discount Amount $"}</Label>
+              <Input
+                type="number"
+                step={discountType === "percentage" ? "1" : "0.01"}
+                min="0"
+                max={discountType === "percentage" ? "100" : String(subtotal)}
+                value={discountValue}
+                onChange={(e) => setDiscountValue(e.target.value)}
+                placeholder={discountType === "percentage" ? "e.g. 10" : "e.g. 5.00"}
+              />
+            </div>
+            {discountValue && (
+              <div className="text-sm text-green-600">
+                Saves: ${(discountType === "percentage"
+                  ? Math.round(subtotal * (parseFloat(discountValue) / 100) * 100) / 100
+                  : Math.min(parseFloat(discountValue) || 0, subtotal)
+                ).toFixed(2)}
+              </div>
+            )}
+            <div className="flex justify-end gap-2">
+              <Button variant="outline" onClick={() => setDiscountDialogOpen(false)}>Cancel</Button>
+              <Button onClick={() => setDiscountDialogOpen(false)}>Apply</Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Split Payment Dialog */}
+      <Dialog open={splitDialogOpen} onOpenChange={setSplitDialogOpen}>
+        <DialogContent className="max-w-xs">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Split className="w-5 h-5" />
+              Split Payment
+            </DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div className="text-sm">
+              Total: <span className="font-semibold">${total.toFixed(2)}</span>
+            </div>
+            <div>
+              <Label>Cash Amount</Label>
+              <Input
+                type="number"
+                step="0.01"
+                min="0.01"
+                max={String(total - 0.01)}
+                value={splitCashAmount}
+                onChange={(e) => setSplitCashAmount(e.target.value)}
+                placeholder="Enter cash portion"
+              />
+            </div>
+            {splitCashAmount && parseFloat(splitCashAmount) > 0 && (
+              <div className="text-sm space-y-1 p-2 bg-muted rounded">
+                <div className="flex justify-between">
+                  <span>Cash</span>
+                  <span>${parseFloat(splitCashAmount).toFixed(2)}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span>Card</span>
+                  <span>${Math.max(0, total - parseFloat(splitCashAmount)).toFixed(2)}</span>
+                </div>
+              </div>
+            )}
+            <div className="flex justify-end gap-2">
+              <Button variant="outline" onClick={() => setSplitDialogOpen(false)}>Cancel</Button>
+              <Button
+                onClick={handleSplitPayment}
+                disabled={!splitCashAmount || parseFloat(splitCashAmount) <= 0 || parseFloat(splitCashAmount) >= total || createOrderMutation.isPending}
+              >
+                {createOrderMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : null}
+                Process Split
+              </Button>
             </div>
           </div>
         </DialogContent>

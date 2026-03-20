@@ -34,6 +34,7 @@ export interface SalesReport {
   sourceBreakdown: Array<{ source: string; count: number; total: number }>;
   typeBreakdown: Array<{ type: string; count: number; total: number }>;
   totals: { orders: number; grossSales: number; discounts: number; netSales: number; tax: number; tips: number; total: number };
+  itemsSoldByDay: Array<{ date: string; items: Array<{ name: string; quantity: number; revenue: number }> }>;
 }
 
 export interface ProductMixReport {
@@ -46,9 +47,10 @@ export interface ProductMixReport {
 export interface LaborReport {
   employeeSummary: Array<{
     userId: number; name: string; role: string; hoursWorked: number;
-    breakMinutes: number; laborCost: number; shiftsCount: number;
+    breakMinutes: number; laborCost: number; shiftsCount: number; tips: number;
   }>;
   dailyLaborTrend: Array<{ date: string; totalHours: number; totalCost: number }>;
+  totalTips: number;
   laborVsRevenue: { totalLaborCost: number; totalRevenue: number; ratio: number };
   overtimeFlags: Array<{ userId: number; name: string; date: string; hoursWorked: number; type: string }>;
 }
@@ -58,6 +60,35 @@ export interface CustomerReport {
   topBySpend: Array<{ id: number; name: string; phone: string | null; lifetimeSpend: number; visitCount: number; tier: string }>;
   tierDistribution: Array<{ tier: string; count: number }>;
   acquisitionTrend: Array<{ date: string; newCustomers: number }>;
+}
+
+export interface EnterpriseReport {
+  overview: {
+    totalRevenue: number;
+    totalOrders: number;
+    avgOrderValue: number;
+    totalTips: number;
+    totalLaborCost: number;
+    laborRatio: number;
+  };
+  locationBreakdown: Array<{
+    locationId: number;
+    locationName: string;
+    revenue: number;
+    orders: number;
+    avgOrderValue: number;
+    tips: number;
+    laborCost: number;
+    laborRatio: number;
+  }>;
+  dailyTrend: Array<{
+    date: string;
+    [locationName: string]: string | number;
+  }>;
+  paymentBreakdown: Array<{ method: string; count: number; total: number }>;
+  sourceBreakdown: Array<{ source: string; count: number; total: number }>;
+  topItems: Array<{ name: string; quantity: number; revenue: number }>;
+  itemsSoldByDay: Array<{ date: string; items: Array<{ name: string; quantity: number; revenue: number }> }>;
 }
 
 export interface IStorage {
@@ -104,6 +135,7 @@ export interface IStorage {
   getOrder(id: number): Promise<Order | undefined>;
   createOrder(data: InsertOrder): Promise<Order>;
   updateOrderStatus(id: number, status: string): Promise<Order | undefined>;
+  updateOrder(id: number, data: Partial<any>): Promise<Order | undefined>;
 
   // Order Items
   getOrderItems(orderId: number): Promise<OrderItem[]>;
@@ -153,6 +185,7 @@ export interface IStorage {
   getActiveShift(userId: number): Promise<import("@shared/schema").Shift | undefined>;
   createShift(data: import("@shared/schema").InsertShift): Promise<import("@shared/schema").Shift>;
   updateShift(id: number, data: Partial<import("@shared/schema").InsertShift & { totalHours: number }>): Promise<import("@shared/schema").Shift | undefined>;
+  deleteShift(id: number): Promise<boolean>;
 
   // Settlements (End-of-Day)
   getSettlements(locationId?: number): Promise<import("@shared/schema").Settlement[]>;
@@ -176,6 +209,16 @@ export interface IStorage {
   getReportProductMix(locationId: number, startDate: string, endDate: string): Promise<ProductMixReport>;
   getReportLabor(locationId: number, startDate: string, endDate: string): Promise<LaborReport>;
   getReportCustomers(locationId: number, startDate: string, endDate: string): Promise<CustomerReport>;
+  getReportEnterprise(startDate: string, endDate: string): Promise<EnterpriseReport>;
+
+  // Audit Log
+  getAuditLogs(locationId?: number, action?: string, startDate?: string, endDate?: string): Promise<import("@shared/schema").AuditLog[]>;
+  createAuditLog(data: import("@shared/schema").InsertAuditLog): Promise<import("@shared/schema").AuditLog>;
+
+  // Tip Pool Config
+  getTipPoolConfig(locationId: number): Promise<import("@shared/schema").TipPoolConfig | undefined>;
+  createTipPoolConfig(data: import("@shared/schema").InsertTipPoolConfig): Promise<import("@shared/schema").TipPoolConfig>;
+  updateTipPoolConfig(id: number, data: Partial<import("@shared/schema").InsertTipPoolConfig>): Promise<import("@shared/schema").TipPoolConfig | undefined>;
 }
 
 export class MemStorage implements IStorage {
@@ -1391,6 +1434,7 @@ export class MemStorage implements IStorage {
   async getActiveShift() { return undefined; }
   async createShift(data: any) { return { id: 0, ...data } as any; }
   async updateShift() { return undefined; }
+  async deleteShift() { return false; }
 
   // ============ SETTLEMENTS (stubs) ============
   async getSettlements() { return []; }
@@ -1409,17 +1453,34 @@ export class MemStorage implements IStorage {
     return { kpis: { totalRevenue: 0, totalOrders: 0, avgOrderValue: 0, totalTips: 0 }, revenueTrend: [], ordersBySource: [], ordersByPayment: [], hourlyDistribution: [] };
   }
   async getReportSales(): Promise<SalesReport> {
-    return { dailyBreakdown: [], paymentBreakdown: [], sourceBreakdown: [], typeBreakdown: [], totals: { orders: 0, grossSales: 0, discounts: 0, netSales: 0, tax: 0, tips: 0, total: 0 } };
+    return { dailyBreakdown: [], paymentBreakdown: [], sourceBreakdown: [], typeBreakdown: [], totals: { orders: 0, grossSales: 0, discounts: 0, netSales: 0, tax: 0, tips: 0, total: 0 }, itemsSoldByDay: [] };
   }
   async getReportProductMix(): Promise<ProductMixReport> {
     return { topByQuantity: [], topByRevenue: [], categoryBreakdown: [], itemProfitability: [] };
   }
   async getReportLabor(): Promise<LaborReport> {
-    return { employeeSummary: [], dailyLaborTrend: [], laborVsRevenue: { totalLaborCost: 0, totalRevenue: 0, ratio: 0 }, overtimeFlags: [] };
+    return { employeeSummary: [], dailyLaborTrend: [], totalTips: 0, laborVsRevenue: { totalLaborCost: 0, totalRevenue: 0, ratio: 0 }, overtimeFlags: [] };
   }
   async getReportCustomers(): Promise<CustomerReport> {
     return { newVsReturning: { newCustomers: 0, returningCustomers: 0 }, topBySpend: [], tierDistribution: [], acquisitionTrend: [] };
   }
+  async getReportEnterprise(): Promise<EnterpriseReport> {
+    return { overview: { totalRevenue: 0, totalOrders: 0, avgOrderValue: 0, totalTips: 0, totalLaborCost: 0, laborRatio: 0 }, locationBreakdown: [], dailyTrend: [], paymentBreakdown: [], sourceBreakdown: [], topItems: [], itemsSoldByDay: [] };
+  }
+
+  async updateOrder(id: number, data: Partial<any>): Promise<Order | undefined> {
+    const order = this.orders.get(id);
+    if (!order) return undefined;
+    const updated = { ...order, ...data };
+    this.orders.set(id, updated);
+    return updated;
+  }
+
+  async getAuditLogs(): Promise<any[]> { return []; }
+  async createAuditLog(data: any): Promise<any> { return { id: 1, ...data, createdAt: new Date() }; }
+  async getTipPoolConfig(): Promise<any> { return undefined; }
+  async createTipPoolConfig(data: any): Promise<any> { return { id: 1, ...data, createdAt: new Date() }; }
+  async updateTipPoolConfig(): Promise<any> { return undefined; }
 }
 
 import { DatabaseStorage } from "./database-storage";

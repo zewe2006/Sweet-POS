@@ -13,6 +13,9 @@ import {
   Trophy,
   Clock,
   LockKeyhole,
+  LayoutDashboard,
+  Shield,
+  Coins,
 } from "lucide-react";
 import {
   Sidebar,
@@ -35,19 +38,24 @@ import {
 import { useQuery } from "@tanstack/react-query";
 import type { Location as StoreLocation } from "@shared/schema";
 
+// Role-based navigation: which roles can see each page
+// admin/manager see everything; cashier/kitchen see limited set
 const navItems = [
-  { title: "POS", href: "/", icon: ShoppingCart },
-  { title: "Kitchen Display", href: "/kitchen", icon: UtensilsCrossed },
-  { title: "Orders", href: "/orders", icon: ClipboardList },
-  { title: "Customers", href: "/customers", icon: Users },
-  { title: "Gift Cards", href: "/gift-cards", icon: Gift },
-  { title: "Rewards", href: "/rewards", icon: Trophy },
-  { title: "Time Clock", href: "/time-clock", icon: Clock },
-  { title: "Menu", href: "/menu", icon: BookOpen },
-  { title: "Settlement", href: "/settlement", icon: LockKeyhole },
-  { title: "Reports", href: "/reports", icon: BarChart3 },
-  { title: "Promotions", href: "/promotions", icon: Megaphone },
-  { title: "Settings", href: "/settings", icon: Settings },
+  { title: "Dashboard", href: "/", icon: LayoutDashboard, roles: ["admin", "manager"] },
+  { title: "POS", href: "/pos", icon: ShoppingCart, roles: ["admin", "manager", "cashier"] },
+  { title: "Kitchen Display", href: "/kitchen", icon: UtensilsCrossed, roles: ["admin", "manager", "cashier", "kitchen"] },
+  { title: "Orders", href: "/orders", icon: ClipboardList, roles: ["admin", "manager", "cashier"] },
+  { title: "Customers", href: "/customers", icon: Users, roles: ["admin", "manager"] },
+  { title: "Gift Cards", href: "/gift-cards", icon: Gift, roles: ["admin", "manager", "cashier"] },
+  { title: "Rewards", href: "/rewards", icon: Trophy, roles: ["admin", "manager"] },
+  { title: "Time Clock", href: "/time-clock", icon: Clock, roles: ["admin", "manager", "cashier", "kitchen"] },
+  { title: "Menu", href: "/menu", icon: BookOpen, roles: ["admin", "manager"] },
+  { title: "Settlement", href: "/settlement", icon: LockKeyhole, roles: ["admin", "manager"] },
+  { title: "Tip Pool", href: "/tip-pool", icon: Coins, roles: ["admin", "manager"] },
+  { title: "Reports", href: "/reports", icon: BarChart3, roles: ["admin", "manager"] },
+  { title: "Audit Log", href: "/audit-log", icon: Shield, roles: ["admin"] },
+  { title: "Promotions", href: "/promotions", icon: Megaphone, roles: ["admin", "manager"] },
+  { title: "Settings", href: "/settings", icon: Settings, roles: ["admin"] },
 ];
 
 function SweetHutLogo() {
@@ -97,10 +105,16 @@ function SweetHutLogo() {
 interface AppSidebarProps {
   locationId: number;
   onLocationChange: (id: number) => void;
+  userRole?: string;
 }
 
-export function AppSidebar({ locationId, onLocationChange }: AppSidebarProps) {
+export function AppSidebar({ locationId, onLocationChange, userRole }: AppSidebarProps) {
   const [location] = useLocation();
+
+  // Filter nav items by role (default to showing all if no role set — backwards compatible)
+  const visibleNavItems = userRole
+    ? navItems.filter((item) => item.roles.includes(userRole))
+    : navItems;
 
   const { data: locations = [] } = useQuery<StoreLocation[]>({
     queryKey: ["/api/locations"],
@@ -119,7 +133,7 @@ export function AppSidebar({ locationId, onLocationChange }: AppSidebarProps) {
         <SidebarGroup>
           <SidebarGroupContent>
             <SidebarMenu>
-              {navItems.map((item) => {
+              {visibleNavItems.map((item) => {
                 const isActive =
                   item.href === "/"
                     ? location === "/" || location === ""

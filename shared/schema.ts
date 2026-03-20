@@ -154,8 +154,22 @@ export const orders = pgTable("orders", {
   tax: real("tax").notNull(),
   tip: real("tip").default(0),
   total: real("total").notNull(),
-  paymentMethod: text("payment_method"), // 'stripe' | 'cash' | 'external' | 'gift_card'
+  paymentMethod: text("payment_method"), // 'stripe' | 'cash' | 'external' | 'gift_card' | 'split'
   paymentIntentId: text("payment_intent_id"),
+  // Split payment details
+  splitPayments: jsonb("split_payments").$type<Array<{method: string, amount: number}>>(),
+  // Discount
+  discountType: text("discount_type"), // 'percentage' | 'fixed' | 'promotion'
+  discountValue: real("discount_value"), // amount or percentage
+  discountAmount: real("discount_amount").default(0), // calculated discount in dollars
+  promotionId: integer("promotion_id"), // linked promotion if applicable
+  // Refund
+  refundAmount: real("refund_amount").default(0),
+  refundReason: text("refund_reason"),
+  refundedBy: text("refunded_by"), // name of who issued refund
+  refundedAt: timestamp("refunded_at"),
+  // Customer email for digital receipts
+  customerEmail: text("customer_email"),
   notes: text("notes"),
   createdAt: timestamp("created_at").defaultNow(),
   updatedAt: timestamp("updated_at").defaultNow(),
@@ -383,3 +397,40 @@ export const cashDrawerTransactions = pgTable("cash_drawer_transactions", {
 export const insertCashDrawerTransactionSchema = createInsertSchema(cashDrawerTransactions).omit({ id: true, createdAt: true });
 export type InsertCashDrawerTransaction = z.infer<typeof insertCashDrawerTransactionSchema>;
 export type CashDrawerTransaction = typeof cashDrawerTransactions.$inferSelect;
+
+// ============ AUDIT LOG ============
+export const auditLogs = pgTable("audit_logs", {
+  id: serial("id").primaryKey(),
+  locationId: integer("location_id"),
+  userId: integer("user_id"),
+  userName: text("user_name"),
+  action: text("action").notNull(), // 'void_order' | 'refund' | 'cancel_order' | 'cash_drawer_open' | 'price_change' | 'discount_applied' | 'split_payment' | 'login' | 'settings_change'
+  targetType: text("target_type"), // 'order' | 'menu_item' | 'cash_drawer' | 'user' | 'shift'
+  targetId: integer("target_id"),
+  details: text("details"), // human-readable description
+  metadata: jsonb("metadata").$type<Record<string, any>>(), // structured data
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export const insertAuditLogSchema = createInsertSchema(auditLogs).omit({ id: true, createdAt: true });
+export type InsertAuditLog = z.infer<typeof insertAuditLogSchema>;
+export type AuditLog = typeof auditLogs.$inferSelect;
+
+// ============ TIP POOL CONFIG ============
+export const tipPoolConfig = pgTable("tip_pool_config", {
+  id: serial("id").primaryKey(),
+  locationId: integer("location_id").notNull(),
+  name: text("name").notNull(), // e.g. "Default Pool"
+  isActive: boolean("is_active").default(true),
+  // Role percentages (must sum to 100)
+  cashierPercent: real("cashier_percent").default(40),
+  kitchenPercent: real("kitchen_percent").default(30),
+  managerPercent: real("manager_percent").default(30),
+  // Distribution method
+  method: text("method").default("equal"), // 'equal' | 'hours_worked' | 'custom'
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export const insertTipPoolConfigSchema = createInsertSchema(tipPoolConfig).omit({ id: true, createdAt: true });
+export type InsertTipPoolConfig = z.infer<typeof insertTipPoolConfigSchema>;
+export type TipPoolConfig = typeof tipPoolConfig.$inferSelect;

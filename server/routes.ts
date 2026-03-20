@@ -16,7 +16,7 @@ import {
   insertLocationSchema,
   insertUserSchema,
 } from "@shared/schema";
-import { log } from "./index";
+import { log } from "./log";
 
 export async function registerRoutes(
   httpServer: Server,
@@ -630,6 +630,54 @@ export async function registerRoutes(
     res.json(updated);
   });
 
+  // PATCH /api/shifts/:id - admin adjust shift (edit clock-in/out times, break, notes)
+  app.patch("/api/shifts/:id", async (req, res) => {
+    const id = Number(req.params.id);
+    const { clockIn, clockOut, breakMinutes, notes } = req.body;
+
+    const updates: Record<string, unknown> = {};
+    if (clockIn) updates.clockIn = new Date(clockIn);
+    if (clockOut) updates.clockOut = new Date(clockOut);
+    if (breakMinutes !== undefined) updates.breakMinutes = Number(breakMinutes);
+    if (notes !== undefined) updates.notes = notes;
+
+    // Recalculate total hours if clock times changed
+    const ciTime = updates.clockIn ? new Date(clockIn) : undefined;
+    const coTime = updates.clockOut ? new Date(clockOut) : undefined;
+
+    if (ciTime || coTime) {
+      // Need both times to calculate — fetch existing if one is missing
+      const shifts = await storage.getShifts();
+      const existing = shifts.find(s => s.id === id);
+      if (!existing) return res.status(404).json({ message: "Shift not found" });
+
+      const finalClockIn = ciTime || new Date(existing.clockIn);
+      const finalClockOut = coTime || (existing.clockOut ? new Date(existing.clockOut) : null);
+
+      if (finalClockOut) {
+        const diffMs = finalClockOut.getTime() - finalClockIn.getTime();
+        const diffHours = diffMs / (1000 * 60 * 60);
+        const breakHrs = ((updates.breakMinutes as number) ?? existing.breakMinutes ?? 0) / 60;
+        updates.totalHours = Math.max(0, Math.round((diffHours - breakHrs) * 100) / 100);
+      }
+    }
+
+    const updated = await storage.updateShift(id, updates);
+    if (!updated) return res.status(404).json({ message: "Shift not found" });
+
+    log(`Shift ${id} adjusted by admin`, "shift");
+    res.json(updated);
+  });
+
+  // DELETE /api/shifts/:id - admin delete shift
+  app.delete("/api/shifts/:id", async (req, res) => {
+    const id = Number(req.params.id);
+    const deleted = await storage.deleteShift(id);
+    if (!deleted) return res.status(404).json({ message: "Shift not found" });
+    log(`Shift ${id} deleted by admin`, "shift");
+    res.json({ success: true });
+  });
+
   // ============ SETTLEMENTS (End-of-Day) ============
 
   // GET /api/settlements?locationId= - list settlement history
@@ -943,6 +991,14 @@ export async function registerRoutes(
     res.json(data);
   });
 
+  // GET /api/reports/enterprise - multi-location enterprise report
+  app.get("/api/reports/enterprise", async (req, res) => {
+    const startDate = String(req.query.startDate || new Date().toISOString().split("T")[0]);
+    const endDate = String(req.query.endDate || startDate);
+    const data = await storage.getReportEnterprise(startDate, endDate);
+    res.json(data);
+  });
+
   // ============ PROMOTIONS ============
 
   app.get("/api/promotions", async (_req, res) => {
@@ -1189,6 +1245,53 @@ export async function registerRoutes(
     if (!user) return res.status(401).json({ message: "User not found" });
     const { password: _, ...safeUser } = user;
     res.json(safeUser);
+  });
+
+  // POST /api/auth/register - employee self-registration
+  app.post("/api/auth/register", async (req, res) => {
+    const { username, password, name, pin } = req.body;
+    if (!username || !password || !name) {
+      return res.status(400).json({ message: "Username, password, and name are required" });
+    }
+    const existing = await storage.getUserByUsername(username);
+    if (existing) {
+      return res.status(409).json({ message: "Username already exists" });
+    }
+    // If PIN provided, verify it belongs to an existing employee and link accounts
+    if (pin) {
+      const pinUser = await storage.getUserByPin(pin);
+      if (!pinUser) {
+        return res.status(400).json({ message: "Invalid PIN. Please enter the PIN assigned to you by your manager." });
+      }
+      // Update the existing employee record with login credentials
+      const updated = await storage.updateUser(pinUser.id, { username, password, name });
+      if (!updated) return res.status(500).json({ message: "Failed to update account" });
+      const { password: _, ...safeUser } = updated;
+      return res.json(safeUser);
+    }
+    // Create new employee account (cashier role by default)
+    const user = await storage.createUser({
+      username,
+      password,
+      name,
+      role: "cashier",
+      isActive: true,
+    });
+    const { password: _, ...safeUser } = user;
+    res.status(201).json(safeUser);
+  });
+
+  // GET /api/employee/shifts - get shifts for authenticated employee
+  app.get("/api/employee/shifts", async (req, res) => {
+    const userId = req.headers["x-user-id"];
+    if (!userId) return res.status(401).json({ message: "Not authenticated" });
+    const user = await storage.getUser(Number(userId));
+    if (!user) return res.status(401).json({ message: "User not found" });
+    const allShifts = await storage.getShifts();
+    const myShifts = allShifts
+      .filter((s) => s.userId === user.id)
+      .sort((a, b) => new Date(b.clockIn).getTime() - new Date(a.clockIn).getTime());
+    res.json(myShifts);
   });
 
   // ============ CUSTOMERS ============
@@ -1447,6 +1550,254 @@ export async function registerRoutes(
     const giftCardId = req.query.giftCardId ? Number(req.query.giftCardId) : undefined;
     const transactions = await storage.getCustomerTransactions(customerId, giftCardId);
     res.json(transactions);
+  });
+
+  // ============ REFUNDS ============
+
+  app.post("/api/orders/:id/refund", async (req, res) => {
+    const id = Number(req.params.id);
+    const { amount, reason, refundedBy } = req.body;
+    const order = await storage.getOrder(id);
+    if (!order) return res.status(404).json({ message: "Order not found" });
+    if (order.status !== "closed" && order.status !== "completed") {
+      return res.status(400).json({ message: "Can only refund closed/completed orders" });
+    }
+    if (!amount || amount <= 0) {
+      return res.status(400).json({ message: "Refund amount must be positive" });
+    }
+    const existingRefund = (order as any).refundAmount || 0;
+    if (existingRefund + amount > order.total) {
+      return res.status(400).json({ message: "Refund amount exceeds order total" });
+    }
+    const updated = await storage.updateOrder(id, {
+      refundAmount: existingRefund + amount,
+      refundReason: reason || "Customer request",
+      refundedBy: refundedBy || "Unknown",
+      refundedAt: new Date(),
+      status: existingRefund + amount >= order.total ? "cancelled" : order.status,
+    });
+    // Audit log
+    await storage.createAuditLog({
+      locationId: order.locationId,
+      userId: null,
+      userName: refundedBy || null,
+      action: "refund",
+      targetType: "order",
+      targetId: order.id,
+      details: `Refund $${amount.toFixed(2)} on order ${order.orderNumber}. Reason: ${reason || "Customer request"}`,
+      metadata: { amount, reason, orderTotal: order.total },
+    });
+    res.json(updated);
+  });
+
+  // ============ AUDIT LOG ============
+
+  app.get("/api/audit-logs", async (req, res) => {
+    const locationId = req.query.locationId ? Number(req.query.locationId) : undefined;
+    const action = req.query.action ? String(req.query.action) : undefined;
+    const startDate = req.query.startDate ? String(req.query.startDate) : undefined;
+    const endDate = req.query.endDate ? String(req.query.endDate) : undefined;
+    const logs = await storage.getAuditLogs(locationId, action, startDate, endDate);
+    res.json(logs);
+  });
+
+  app.post("/api/audit-logs", async (req, res) => {
+    const logEntry = await storage.createAuditLog(req.body);
+    res.status(201).json(logEntry);
+  });
+
+  // ============ TIP POOL ============
+
+  app.get("/api/tip-pool/config", async (req, res) => {
+    const locationId = req.query.locationId ? Number(req.query.locationId) : 1;
+    const config = await storage.getTipPoolConfig(locationId);
+    if (!config) {
+      // Return default config
+      return res.json({
+        id: 0,
+        locationId,
+        name: "Default Pool",
+        isActive: true,
+        cashierPercent: 40,
+        kitchenPercent: 30,
+        managerPercent: 30,
+        method: "equal",
+      });
+    }
+    res.json(config);
+  });
+
+  app.post("/api/tip-pool/config", async (req, res) => {
+    const config = await storage.createTipPoolConfig(req.body);
+    res.status(201).json(config);
+  });
+
+  app.patch("/api/tip-pool/config/:id", async (req, res) => {
+    const id = Number(req.params.id);
+    const updated = await storage.updateTipPoolConfig(id, req.body);
+    if (!updated) return res.status(404).json({ message: "Config not found" });
+    res.json(updated);
+  });
+
+  app.get("/api/tip-pool/distribute", async (req, res) => {
+    const locationId = req.query.locationId ? Number(req.query.locationId) : 1;
+    const startDate = String(req.query.startDate || new Date().toISOString().split("T")[0]);
+    const endDate = String(req.query.endDate || new Date().toISOString().split("T")[0]);
+
+    // Get config
+    const config = await storage.getTipPoolConfig(locationId);
+    const cashierPct = config?.cashierPercent ?? 40;
+    const kitchenPct = config?.kitchenPercent ?? 30;
+    const managerPct = config?.managerPercent ?? 30;
+    const method = config?.method ?? "equal";
+
+    // Get total tips for the period
+    const orders = await storage.getOrders(locationId);
+    const periodOrders = orders.filter((o) => {
+      if (!o.createdAt) return false;
+      const d = new Date(o.createdAt).toISOString().split("T")[0];
+      return d >= startDate && d <= endDate && (o.status === "closed" || o.status === "completed");
+    });
+    const totalTips = periodOrders.reduce((sum, o) => sum + (o.tip || 0), 0);
+
+    // Get shifts for the period
+    const shifts = await storage.getShifts(locationId);
+    const periodShifts = shifts.filter((s) => {
+      if (!s.clockIn) return false;
+      const d = new Date(s.clockIn).toISOString().split("T")[0];
+      return d >= startDate && d <= endDate && s.status === "completed";
+    });
+
+    // Get users to map roles
+    const users = await storage.getUsers();
+    const userMap = new Map(users.map((u) => [u.id, u]));
+
+    // Group hours by role
+    const roleHours: Record<string, { userId: number; name: string; hours: number }[]> = {
+      cashier: [],
+      kitchen: [],
+      manager: [],
+      admin: [],
+    };
+
+    for (const shift of periodShifts) {
+      const user = userMap.get(shift.userId);
+      if (!user) continue;
+      const role = user.role || "cashier";
+      const bucket = role === "admin" ? "manager" : role;
+      if (!roleHours[bucket]) roleHours[bucket] = [];
+      const existing = roleHours[bucket].find((e) => e.userId === user.id);
+      if (existing) {
+        existing.hours += shift.totalHours || 0;
+      } else {
+        roleHours[bucket].push({ userId: user.id, name: user.name, hours: shift.totalHours || 0 });
+      }
+    }
+
+    // Distribute tips
+    const distribution: Array<{
+      userId: number;
+      name: string;
+      role: string;
+      hoursWorked: number;
+      tipSharePercent: number;
+      tipAmount: number;
+    }> = [];
+
+    const rolePcts: Record<string, number> = {
+      cashier: cashierPct,
+      kitchen: kitchenPct,
+      manager: managerPct,
+    };
+
+    for (const [role, employees] of Object.entries(roleHours)) {
+      if (employees.length === 0) continue;
+      const rolePool = totalTips * ((rolePcts[role] || 0) / 100);
+      const totalRoleHours = employees.reduce((s, e) => s + e.hours, 0);
+
+      for (const emp of employees) {
+        const share = method === "hours_worked" && totalRoleHours > 0
+          ? (emp.hours / totalRoleHours)
+          : (1 / employees.length);
+        distribution.push({
+          userId: emp.userId,
+          name: emp.name,
+          role,
+          hoursWorked: Math.round(emp.hours * 10) / 10,
+          tipSharePercent: Math.round(share * (rolePcts[role] || 0) * 10) / 10,
+          tipAmount: Math.round(rolePool * share * 100) / 100,
+        });
+      }
+    }
+
+    res.json({ totalTips, startDate, endDate, method, distribution });
+  });
+
+  // ============ DIGITAL RECEIPT (Email/SMS) ============
+
+  app.post("/api/orders/:id/send-receipt", async (req, res) => {
+    const id = Number(req.params.id);
+    const { email, phone } = req.body;
+    const order = await storage.getOrder(id);
+    if (!order) return res.status(404).json({ message: "Order not found" });
+
+    // Save customer email to order if provided
+    if (email) {
+      await storage.updateOrder(id, { customerEmail: email });
+    }
+
+    // In production, integrate with SendGrid/Twilio here
+    // For now, log and return success
+    log(`Digital receipt for ${order.orderNumber} → ${email || phone || "unknown"}`, "receipt");
+
+    await storage.createAuditLog({
+      locationId: order.locationId,
+      action: "receipt_sent",
+      targetType: "order",
+      targetId: order.id,
+      details: `Digital receipt sent for ${order.orderNumber} to ${email || phone}`,
+      metadata: { email, phone },
+    });
+
+    res.json({ success: true, message: `Receipt ${email ? "emailed" : "texted"} to ${email || phone}` });
+  });
+
+  // ============ RECEIPT GENERATION ============
+
+  app.get("/api/orders/:id/receipt", async (req, res) => {
+    const id = Number(req.params.id);
+    const order = await storage.getOrder(id);
+    if (!order) return res.status(404).json({ message: "Order not found" });
+    const items = await storage.getOrderItems(id);
+    const location = await storage.getLocation(order.locationId);
+
+    const receipt = {
+      storeName: location?.name || "Sweet Hut",
+      storeAddress: location ? `${location.address}${location.city ? `, ${location.city}` : ""}${location.state ? ` ${location.state}` : ""} ${location.zip || ""}` : "",
+      storePhone: location?.phone || "",
+      header: location?.receiptHeader || "Thank you for visiting Sweet Hut!",
+      footer: location?.receiptFooter || "Follow us @sweethutbakery",
+      orderNumber: order.orderNumber,
+      date: new Date(order.createdAt!).toLocaleString("en-US"),
+      type: order.type,
+      customerName: order.customerName,
+      items: items.map((i) => ({
+        name: i.name,
+        quantity: i.quantity || 1,
+        unitPrice: i.unitPrice,
+        modifiers: i.modifiers as any[],
+        total: i.unitPrice * (i.quantity || 1),
+      })),
+      subtotal: order.subtotal,
+      tax: order.tax,
+      tip: order.tip || 0,
+      total: order.total,
+      paymentMethod: order.paymentMethod,
+      refundAmount: (order as any).refundAmount || 0,
+      discountAmount: (order as any).discountAmount || 0,
+    };
+
+    res.json(receipt);
   });
 
   return httpServer;
